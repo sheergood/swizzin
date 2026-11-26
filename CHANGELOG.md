@@ -11,6 +11,7 @@ Changes in [sheergood/swizzin](https://github.com/sheergood/swizzin). See `FORK.
 - setup: the first picker offers nginx, qbittorrent, panel and autobrr; rTorrent/Deluge/Transmission prompts are gone
 
 ### New
+- panel: server time, public/local IP with provider and location, and current weather at the server (configurable in `/opt/swizzin/swizzin.cfg`)
 - panel: data transferred today, yesterday, this week, last 7 days, this month and all time, plus a 7-day upload/download chart and table (from vnstat, which the panel now makes sure is enabled)
 - panel: SSDs/NVMe show wear level, life left and an estimated remaining lifetime; HDDs show a SMART attribute table (reallocated, pending, uncorrectable, CRC, spin retry, …) with the last self-test result
 - panel: liquid-glass dashboard from [sheergood/swizzin_dashboard](https://github.com/sheergood/swizzin_dashboard) — CPU, GPU, drive SMART health and wear, live network and disk I/O

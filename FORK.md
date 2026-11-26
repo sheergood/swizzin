@@ -43,6 +43,16 @@ git merge upstream/master   # resolve conflicts, then push
 > longer remove or upgrade them. Remove them with upstream swizzin **before** switching, e.g.
 > `box remove deluge rtorrent`.
 
+## Panel settings (`/opt/swizzin/swizzin.cfg`, then `systemctl restart panel`)
+
+```python
+WEATHER_LAT = 25.43          # show weather for a fixed place instead of the server's location
+WEATHER_LON = 81.85
+WEATHER_PLACE = "Prayagraj"
+WEATHER_UNITS = "metric"     # or "imperial"
+PLACE_LOOKUPS = False        # never contact ipwho.is / ipinfo.io / open-meteo
+```
+
 ## Useful checks on a server
 
 ```bash
