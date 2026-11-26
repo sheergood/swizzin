@@ -40,6 +40,92 @@ EOTMR
     systemctl start swizzin-smart.service >> ${log} 2>&1 || true
 }
 
+# Root timer that snapshots fail2ban jail status and recent bans for the dashboard's Security card.
+function panel_f2b_setup() {
+    mkdir -p /var/lib/swizzin
+    cat > /etc/systemd/system/swizzin-f2b.service << 'EOSVC'
+[Unit]
+Description=swizzin panel fail2ban snapshot
+Documentation=https://github.com/sheergood/swizzin
+After=fail2ban.service
+
+[Service]
+Type=oneshot
+Nice=10
+ExecStart=/usr/bin/python3 /etc/swizzin/scripts/panel-f2b-collect
+EOSVC
+
+    cat > /etc/systemd/system/swizzin-f2b.timer << 'EOTMR'
+[Unit]
+Description=Refresh fail2ban data for the swizzin panel every 2 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target
+EOTMR
+
+    systemctl daemon-reload
+    systemctl enable -q --now swizzin-f2b.timer >> ${log} 2>&1
+    systemctl start swizzin-f2b.service >> ${log} 2>&1 || true
+}
+
+function panel_f2b_remove() {
+    systemctl disable -q --now swizzin-f2b.timer > /dev/null 2>&1
+    rm -f /etc/systemd/system/swizzin-f2b.service /etc/systemd/system/swizzin-f2b.timer /var/lib/swizzin/fail2ban.json
+    systemctl daemon-reload
+}
+
+# Port the panel listens on (swizzin.cfg can override the default 8333).
+function panel_port() {
+    local p
+    p=$(grep -E '^\s*PORT\s*=' /opt/swizzin/swizzin.cfg 2> /dev/null | tail -n1 | grep -oE '[0-9]+')
+    echo "${p:-8333}"
+}
+
+# 0 when the panel answers on its login page within ~20 s.
+function panel_healthy() {
+    local port i
+    local base
+    port=$(panel_port)
+    base=$(grep -E '^\s*URLBASE\s*=' /opt/swizzin/swizzin.cfg 2> /dev/null | tail -n1 | sed -E "s/^[^=]*=\s*['\"]?([^'\"]*)['\"]?.*/\1/")
+    base=${base%/}
+    [[ $base == "/" ]] && base=""
+    for i in $(seq 1 10); do
+        sleep 2
+        if curl -fs -o /dev/null --max-time 3 "http://127.0.0.1:${port}${base}/login"; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Restart the panel and roll /opt/swizzin back to $1 (a commit) if it doesn't come up.
+function panel_restart_or_rollback() {
+    local previous=$1 current
+    current=$(git -C /opt/swizzin rev-parse HEAD 2> /dev/null)
+    systemctl restart panel
+    if panel_healthy; then
+        return 0
+    fi
+    if [[ -n $previous && $previous != "$current" ]]; then
+        echo_warn "Panel did not start on ${current:0:7}; rolling back to ${previous:0:7}"
+        cp -a /opt/swizzin/core/custom /tmp/swizzin-custom.$$ 2> /dev/null
+        sudo -u swizzin git -C /opt/swizzin reset -q --hard "$previous" >> ${log} 2>&1
+        cp -a /tmp/swizzin-custom.$$/. /opt/swizzin/core/custom/ 2> /dev/null
+        rm -rf /tmp/swizzin-custom.$$
+        systemctl restart panel
+        if panel_healthy; then
+            echo_warn "Panel rolled back and running. Check: journalctl -u panel -n 80"
+            return 0
+        fi
+    fi
+    echo_warn "Panel is not responding. Check: journalctl -u panel -n 80   (classic UI: /classic)"
+    return 0 # never fail box update because of the panel
+}
+
 # vnstat feeds the dashboard's daily / weekly / monthly / all-time transfer stats.
 function panel_vnstat_setup() {
     if ! command -v vnstat > /dev/null 2>&1; then
@@ -56,19 +142,25 @@ function panel_smart_remove() {
     systemctl daemon-reload
 }
 
-# Point an existing upstream panel checkout at the fork.
+# Point an existing upstream panel checkout at the fork. Backs up /opt/swizzin first and leaves
+# everything untouched if the fork can't be fetched.
 function panel_use_fork_remote() {
-    local current
+    local current backup
     current=$(git -C /opt/swizzin remote get-url origin 2> /dev/null)
-    if [[ -n $current && $current != "$PANEL_REPO" ]]; then
-        echo_progress_start "Switching panel source to $PANEL_REPO"
-        sudo -u swizzin git -C /opt/swizzin remote set-url origin "$PANEL_REPO" >> ${log} 2>&1
-        sudo -u swizzin git -C /opt/swizzin fetch origin "$PANEL_BRANCH" >> ${log} 2>&1
-        cp -a /opt/swizzin/core/custom /opt/swizzin/core/custom.tmp
-        sudo -u swizzin git -C /opt/swizzin checkout -q -B "$PANEL_BRANCH" "origin/$PANEL_BRANCH" >> ${log} 2>&1
-        sudo -u swizzin git -C /opt/swizzin reset -q --hard "origin/$PANEL_BRANCH" >> ${log} 2>&1
-        cp -a /opt/swizzin/core/custom.tmp/. /opt/swizzin/core/custom/ >> ${log} 2>&1
-        rm -rf /opt/swizzin/core/custom.tmp
-        echo_progress_done "Panel now tracks the fork"
+    [[ -z $current || $current == "$PANEL_REPO" ]] && return 0
+    echo_progress_start "Switching panel source to $PANEL_REPO"
+    backup="/root/swizzin-panel-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
+    tar -czf "$backup" -C /opt swizzin >> ${log} 2>&1 && echo_info "Panel backup: $backup"
+    if ! sudo -u swizzin git -C /opt/swizzin fetch "$PANEL_REPO" "$PANEL_BRANCH" >> ${log} 2>&1; then
+        echo_warn "Could not reach $PANEL_REPO; keeping the current panel"
+        return 0
     fi
+    cp -a /opt/swizzin/core/custom /opt/swizzin/core/custom.tmp
+    sudo -u swizzin git -C /opt/swizzin remote set-url origin "$PANEL_REPO" >> ${log} 2>&1
+    sudo -u swizzin git -C /opt/swizzin fetch origin "$PANEL_BRANCH" >> ${log} 2>&1
+    sudo -u swizzin git -C /opt/swizzin checkout -q -B "$PANEL_BRANCH" "origin/$PANEL_BRANCH" >> ${log} 2>&1
+    sudo -u swizzin git -C /opt/swizzin reset -q --hard "origin/$PANEL_BRANCH" >> ${log} 2>&1
+    cp -a /opt/swizzin/core/custom.tmp/. /opt/swizzin/core/custom/ >> ${log} 2>&1
+    rm -rf /opt/swizzin/core/custom.tmp
+    echo_progress_done "Panel now tracks the fork"
 }

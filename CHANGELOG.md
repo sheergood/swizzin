@@ -1,6 +1,6 @@
 # Changelog
 
-## [sheergood-1] (Unreleased) — fork of 3.15.0
+## [sheergood-1] (Nov 26 2026) — fork of 3.15.0
 
 Changes in [sheergood/swizzin](https://github.com/sheergood/swizzin). See `FORK.md` for how this fork differs from upstream.
 
@@ -10,7 +10,15 @@ Changes in [sheergood/swizzin](https://github.com/sheergood/swizzin). See `FORK.
 - box: `adduser` / `deluser` / `chpasswd` and the per-user sudoers template only handle autobrr and qbittorrent
 - setup: the first picker offers nginx, qbittorrent, panel and autobrr; rTorrent/Deluge/Transmission prompts are gone
 
+### Production safety
+- box update: new panel extras (SMART, fail2ban, vnstat setup) run isolated — if one fails it prints a warning instead of aborting `box update`
+- panel upgrade: after restarting, the panel is health-checked (`/login` must answer within ~20 s); if it doesn't, `/opt/swizzin` is rolled back to the previous commit automatically, keeping `core/custom`
+- panel: switching an existing panel to the fork first saves `/root/swizzin-panel-backup-<date>.tar.gz`, and leaves the panel untouched if the fork can't be fetched
+- update: `00-fork-guard.sh` lists installed apps this fork no longer ships (they keep running; nothing is removed)
+- CI (`.github/workflows/fork-ci.yml`): bash syntax, ShellCheck errors and missing helper checks on every push
+
 ### New
+- panel: Security card with fail2ban status and recent bans, fed by the root `swizzin-f2b.timer` (every 2 min, read-only towards fail2ban)
 - panel: server time, public/local IP with provider and location, and current weather at the server (configurable in `/opt/swizzin/swizzin.cfg`)
 - panel: data transferred today, yesterday, this week, last 7 days, this month and all time, plus a 7-day upload/download chart and table (from vnstat, which the panel now makes sure is enabled)
 - panel: SSDs/NVMe show wear level, life left and an estimated remaining lifetime; HDDs show a SMART attribute table (reallocated, pending, uncorrectable, CRC, spin retry, …) with the last self-test result

@@ -1,0 +1,82 @@
+#!/usr/bin/env python3
+# swizzin panel — fail2ban collector
+# Runs as root from swizzin-f2b.timer and writes jail status plus recent bans to
+# /var/lib/swizzin/fail2ban.json for the unprivileged panel. Read-only towards fail2ban.
+# Part of the sheergood/swizzin fork. Licensed under GNU GPL v3.
+import json
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import tempfile
+import time
+
+OUT = "/var/lib/swizzin/fail2ban.json"
+DB = "/var/lib/fail2ban/fail2ban.sqlite3"
+RECENT = 60
+
+
+def client(*args):
+    try:
+        return subprocess.run(["fail2ban-client"] + list(args), stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, universal_newlines=True, timeout=15).stdout
+    except Exception:
+        return ""
+
+
+def field(text, name):
+    m = re.search(r"{}:\s*(.*)".format(re.escape(name)), text)
+    return m.group(1).strip() if m else ""
+
+
+def main():
+    now = int(time.time())
+    data = {"updated": now, "running": False, "jails": [], "recent": [], "bans_24h": 0, "bans_7d": 0}
+    if shutil.which("fail2ban-client"):
+        status = client("status")
+        data["running"] = "Jail list" in status
+        names = [j.strip() for j in field(status, "Jail list").split(",") if j.strip()]
+        banned_now = {}
+        for name in names:
+            st = client("status", name)
+            ips = field(st, "Banned IP list").split()
+            banned_now[name] = set(ips)
+            data["jails"].append({
+                "name": name,
+                "currently_banned": int(field(st, "Currently banned") or 0),
+                "total_banned": int(field(st, "Total banned") or 0),
+                "currently_failed": int(field(st, "Currently failed") or 0),
+                "total_failed": int(field(st, "Total failed") or 0),
+            })
+        data["banned_now"] = sum(j["currently_banned"] for j in data["jails"])
+        if os.path.exists(DB):
+            try:
+                con = sqlite3.connect("file:{}?mode=ro".format(DB), uri=True, timeout=5)
+                con.row_factory = sqlite3.Row
+                cols = {r[1] for r in con.execute("PRAGMA table_info(bans)")}
+                rows = con.execute("SELECT * FROM bans ORDER BY timeofban DESC LIMIT ?", (RECENT,)).fetchall()
+                for r in rows:
+                    bantime = r["bantime"] if "bantime" in cols else None
+                    data["recent"].append({
+                        "ip": r["ip"], "jail": r["jail"], "time": r["timeofban"],
+                        "bantime": bantime, "count": r["bancount"] if "bancount" in cols else None,
+                        "failures": (json.loads(r["data"]).get("failures") if r["data"] else None)
+                        if "data" in cols else None,
+                        "active": r["ip"] in banned_now.get(r["jail"], set()),
+                    })
+                data["bans_24h"] = con.execute("SELECT COUNT(*) FROM bans WHERE timeofban > ?", (now - 86400,)).fetchone()[0]
+                data["bans_7d"] = con.execute("SELECT COUNT(*) FROM bans WHERE timeofban > ?", (now - 7 * 86400,)).fetchone()[0]
+                con.close()
+            except Exception as e:
+                data["db_error"] = str(e)
+    os.makedirs(os.path.dirname(OUT), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(OUT), prefix=".f2b.")
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f)
+    os.chmod(tmp, 0o644)
+    os.replace(tmp, OUT)
+
+
+if __name__ == "__main__":
+    main()

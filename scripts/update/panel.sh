@@ -43,6 +43,8 @@ if [[ -f /install/.panel.lock ]]; then
 
         chown -R swizzin: /opt/swizzin
         chown -R swizzin: /opt/.venv/swizzin
+        PANEL_PREV=$(git -C /opt/swizzin rev-parse HEAD 2> /dev/null)
+        export PANEL_PREV
         panel_use_fork_remote
         # Handles its own prints FYI
         bash /usr/local/bin/swizzin/upgrade/panel.sh
@@ -64,15 +66,22 @@ swizzin     ALL = (ALL) NOPASSWD: CMNDS, SYSDCMNDS
 EOSUD
     fi
 
+    # Optional panel extras run in subshells: a failure here only warns, it never aborts box update.
     if [[ ! -f /etc/systemd/system/swizzin-smart.timer ]]; then
         echo_progress_start "Adding SMART collector for the panel"
-        panel_smart_setup
+        (panel_smart_setup) || echo_warn "SMART collector setup failed; drive health will be unavailable"
+        echo_progress_done
+    fi
+
+    if [[ ! -f /etc/systemd/system/swizzin-f2b.timer ]]; then
+        echo_progress_start "Adding fail2ban snapshot for the panel"
+        (panel_f2b_setup) || echo_warn "fail2ban snapshot setup failed; the Security card will be empty"
         echo_progress_done
     fi
 
     if ! systemctl is-enabled -q vnstat 2> /dev/null; then
         echo_progress_start "Enabling vnstat for panel traffic stats"
-        panel_vnstat_setup
+        (panel_vnstat_setup) || echo_warn "vnstat setup failed; transfer stats will be unavailable"
         echo_progress_done
     fi
 

@@ -1,0 +1,33 @@
+name: fork-ci
+# Catches broken scripts before a server pulls them with `box update`.
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash syntax
+        run: |
+          set -e
+          for f in setup.sh scripts/box scripts/nukeovh scripts/panel-smart-collect scripts/php-fpm-cli \
+                   $(find scripts/install scripts/remove scripts/upgrade scripts/update scripts/nginx scripts/tests -name '*.sh') \
+                   sources/functions/* sources/globals.sh; do
+            bash -n "$f" || { echo "::error file=$f::bash syntax error"; exit 1; }
+          done
+      - name: shellcheck (errors only)
+        run: |
+          files=$(git ls-files 'scripts/*.sh' 'sources/functions/*' setup.sh scripts/box scripts/panel-smart-collect)
+          # SC2199/SC2072 are pre-existing in upstream libtorrent/qbittorrent helpers
+          shellcheck -S error -x -e SC1091,SC2199,SC2072 $files
+      - name: python collectors
+        run: python3 -m py_compile scripts/panel-f2b-collect
+      - name: no dangling helper references
+        run: |
+          missing=0
+          for f in $(grep -rhoE 'sources/functions/[a-z_]+' scripts sources setup.sh | sort -u); do
+            [ -e "$f" ] || { echo "::error::missing $f"; missing=1; }
+          done
+          exit $missing
