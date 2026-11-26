@@ -1,0 +1,66 @@
+#!/bin/bash
+# Panel helpers for the sheergood/swizzin fork
+
+# Where the dashboard is cloned from. Override with PANEL_REPO / PANEL_BRANCH in the environment.
+PANEL_REPO="${PANEL_REPO:-https://github.com/sheergood/swizzin_dashboard.git}"
+PANEL_BRANCH="${PANEL_BRANCH:-master}"
+
+# Install smartmontools and a root timer that feeds SMART data to the glass dashboard.
+function panel_smart_setup() {
+    apt_install smartmontools
+    mkdir -p /var/lib/swizzin/smart
+
+    cat > /etc/systemd/system/swizzin-smart.service << 'EOSVC'
+[Unit]
+Description=swizzin panel SMART collector
+Documentation=https://github.com/sheergood/swizzin
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=idle
+ExecStart=/bin/bash /etc/swizzin/scripts/panel-smart-collect
+EOSVC
+
+    cat > /etc/systemd/system/swizzin-smart.timer << 'EOTMR'
+[Unit]
+Description=Refresh SMART data for the swizzin panel every 10 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=10min
+RandomizedDelaySec=30s
+
+[Install]
+WantedBy=timers.target
+EOTMR
+
+    systemctl daemon-reload
+    systemctl enable -q --now swizzin-smart.timer >> ${log} 2>&1
+    systemctl start swizzin-smart.service >> ${log} 2>&1 || true
+}
+
+function panel_smart_remove() {
+    systemctl disable -q --now swizzin-smart.timer > /dev/null 2>&1
+    rm -f /etc/systemd/system/swizzin-smart.service /etc/systemd/system/swizzin-smart.timer
+    rm -rf /var/lib/swizzin/smart
+    rmdir /var/lib/swizzin > /dev/null 2>&1
+    systemctl daemon-reload
+}
+
+# Point an existing upstream panel checkout at the fork.
+function panel_use_fork_remote() {
+    local current
+    current=$(git -C /opt/swizzin remote get-url origin 2> /dev/null)
+    if [[ -n $current && $current != "$PANEL_REPO" ]]; then
+        echo_progress_start "Switching panel source to $PANEL_REPO"
+        sudo -u swizzin git -C /opt/swizzin remote set-url origin "$PANEL_REPO" >> ${log} 2>&1
+        sudo -u swizzin git -C /opt/swizzin fetch origin "$PANEL_BRANCH" >> ${log} 2>&1
+        cp -a /opt/swizzin/core/custom /opt/swizzin/core/custom.tmp
+        sudo -u swizzin git -C /opt/swizzin checkout -q -B "$PANEL_BRANCH" "origin/$PANEL_BRANCH" >> ${log} 2>&1
+        sudo -u swizzin git -C /opt/swizzin reset -q --hard "origin/$PANEL_BRANCH" >> ${log} 2>&1
+        cp -a /opt/swizzin/core/custom.tmp/. /opt/swizzin/core/custom/ >> ${log} 2>&1
+        rm -rf /opt/swizzin/core/custom.tmp
+        echo_progress_done "Panel now tracks the fork"
+    fi
+}

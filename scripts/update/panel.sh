@@ -5,6 +5,8 @@ if [[ -f /install/.panel.lock ]]; then
     . /etc/swizzin/sources/functions/utils
     #shellcheck source=sources/functions/pyenv
     . /etc/swizzin/sources/functions/pyenv
+    #shellcheck source=sources/functions/panel
+    . /etc/swizzin/sources/functions/panel
     if [[ ! -d /opt/swizzin ]]; then
         echo_progress_start "swizzifying the panel"
         rm_if_exists "/srv/panel"
@@ -41,6 +43,7 @@ if [[ -f /install/.panel.lock ]]; then
 
         chown -R swizzin: /opt/swizzin
         chown -R swizzin: /opt/.venv/swizzin
+        panel_use_fork_remote
         # Handles its own prints FYI
         bash /usr/local/bin/swizzin/upgrade/panel.sh
 
@@ -59,6 +62,12 @@ Cmnd_Alias   SYSDCMNDS = /bin/systemctl start *, /bin/systemctl stop *, /bin/sys
 
 swizzin     ALL = (ALL) NOPASSWD: CMNDS, SYSDCMNDS
 EOSUD
+    fi
+
+    if [[ ! -f /etc/systemd/system/swizzin-smart.timer ]]; then
+        echo_progress_start "Adding SMART collector for the panel"
+        panel_smart_setup
+        echo_progress_done
     fi
 
     if grep -q -E "swizzin.*/bin/sh" /etc/passwd; then

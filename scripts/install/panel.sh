@@ -24,6 +24,8 @@ fi
 . /etc/swizzin/sources/functions/utils
 #shellcheck source=sources/functions/pyenv
 . /etc/swizzin/sources/functions/pyenv
+#shellcheck source=sources/functions/panel
+. /etc/swizzin/sources/functions/panel
 
 master=$(_get_master_username)
 
@@ -53,7 +55,7 @@ case ${PYENV} in
 esac
 
 echo_progress_start "Cloning panel"
-git clone https://github.com/liaralabs/swizzin_dashboard.git /opt/swizzin >> ${log} 2>&1
+git clone -b "$PANEL_BRANCH" "$PANEL_REPO" /opt/swizzin >> ${log} 2>&1
 echo_progress_done "Panel cloned"
 
 echo_progress_start "Installing python dependencies"
@@ -83,6 +85,10 @@ echo_progress_done
 echo_progress_start "Configuring nginx"
 bash /usr/local/bin/swizzin/nginx/panel.sh
 systemctl reload nginx
+echo_progress_done
+
+echo_progress_start "Setting up SMART collector for drive health"
+panel_smart_setup
 echo_progress_done
 
 echo_progress_start "Installing systemd service"

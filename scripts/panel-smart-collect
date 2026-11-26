@@ -1,0 +1,36 @@
+#!/bin/bash
+# swizzin panel — SMART collector
+# Runs as root from swizzin-smart.timer and writes `smartctl -j -a` output for every
+# physical disk to /var/lib/swizzin/smart/<disk>.json, which the unprivileged panel reads.
+# Part of the sheergood/swizzin fork. Licensed under GNU GPL v3.
+
+set -u
+out=/var/lib/swizzin/smart
+mkdir -p "$out"
+chmod 755 "$out"
+command -v smartctl > /dev/null 2>&1 || exit 0
+
+seen=" "
+for dev in /sys/block/*; do
+    name=${dev##*/}
+    case $name in loop* | ram* | zram* | dm-* | md* | sr* | fd* | nbd*) continue ;; esac
+    [[ -e $dev/device ]] || continue
+    seen+="$name.json "
+    tmp=$(mktemp "$out/.${name}.XXXXXX")
+    # -n standby: never spin up a sleeping HDD just to read SMART (keeps the previous file instead)
+    smartctl -j -a -n standby "/dev/$name" > "$tmp" 2> /dev/null
+    rc=$?
+    # exit bits 0-1 = bad args / device open failed or in standby; higher bits are health flags with valid JSON
+    if ((rc & 3)) || [[ ! -s $tmp ]]; then
+        rm -f "$tmp"
+        continue
+    fi
+    chmod 644 "$tmp"
+    mv -f "$tmp" "$out/$name.json"
+done
+
+# forget disks that were removed
+for f in "$out"/*.json; do
+    [[ -e $f ]] || continue
+    [[ $seen == *" ${f##*/} "* ]] || rm -f "$f"
+done

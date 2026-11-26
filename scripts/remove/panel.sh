@@ -1,4 +1,6 @@
 #!/bin/bash
+#shellcheck source=sources/functions/panel
+. /etc/swizzin/sources/functions/panel
 
 systemctl disable --now -q panel
 rm -rf /srv/panel > /dev/null 2>&1
@@ -10,4 +12,5 @@ fi
 rm -f /etc/nginx/apps/panel.conf
 rm -f /etc/sudoers.d/panel
 rm /etc/cron.d/set_interface > /dev/null 2>&1
+panel_smart_remove
 rm /install/.panel.lock
