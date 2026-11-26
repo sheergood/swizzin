@@ -4,7 +4,15 @@
 
 Changes in [sheergood/swizzin](https://github.com/sheergood/swizzin). See `FORK.md` for how this fork differs from upstream.
 
+### Removed
+- Every application except **autobrr, filebrowser, plex, prowlarr, qbittorrent, radarr and sonarr**, including their install/remove/upgrade/update/nginx/test scripts and helper functions (airsonic, bazarr, btsync, calibre, calibrecs, calibreweb, deluge, duckdns, emby, ffmpeg, flood, jackett, jellyfin, jfago, librespeed, lidarr, lounge, medusa, mylar, navidrome, netdata, netronome, nextcloud, nzbget, nzbhydra, ombi, organizr, quassel, qui, quota, rapidleech, rclone, rtorrent, rutorrent, sabnzbd, shellinabox, sickchill, sickgear, syncthing, tautulli, transmission, vsftpd, webmin, wireguard, x2go, xmrig, znc and leftover remove scripts for long-retired apps)
+- `scripts/rtx`, `scripts/setdisk` (quota), the deluge helper scripts and `sources/patches`
+- box: `adduser` / `deluser` / `chpasswd` and the per-user sudoers template only handle autobrr and qbittorrent
+- setup: the first picker offers nginx, qbittorrent, panel and autobrr; rTorrent/Deluge/Transmission prompts are gone
+
 ### New
+- panel: data transferred today, yesterday, this week, last 7 days, this month and all time, plus a 7-day upload/download chart and table (from vnstat, which the panel now makes sure is enabled)
+- panel: SSDs/NVMe show wear level, life left and an estimated remaining lifetime; HDDs show a SMART attribute table (reallocated, pending, uncorrectable, CRC, spin retry, …) with the last self-test result
 - panel: liquid-glass dashboard from [sheergood/swizzin_dashboard](https://github.com/sheergood/swizzin_dashboard) — CPU, GPU, drive SMART health and wear, live network and disk I/O
 - panel: `swizzin-smart.timer` (root, every 10 min) runs `scripts/panel-smart-collect` and writes `smartctl` JSON to `/var/lib/swizzin/smart/` for the dashboard; never wakes sleeping HDDs
 - panel: `smartmontools` is installed with the panel and added to existing panels on `box update`

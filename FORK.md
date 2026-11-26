@@ -11,7 +11,9 @@ Licensed under GPL-3.0 like upstream; every change is listed in `CHANGELOG.md` u
 | Installer source | `swizzin/swizzin` | `sheergood/swizzin` (`SWIZ_REPO` overrides) |
 | Panel source | `liaralabs/swizzin_dashboard` | `sheergood/swizzin_dashboard` (`PANEL_REPO`, `PANEL_BRANCH`) |
 | Panel UI | Bootstrap dashboard | Liquid-glass dashboard with CPU/GPU/SMART/wear/network detail; old UI at `/classic` |
-| Drive health | — | `swizzin-smart.timer` → `/var/lib/swizzin/smart/*.json` |
+| Apps | ~60 | autobrr, filebrowser, plex, prowlarr, qbittorrent, radarr, sonarr (+ nginx, panel, letsencrypt) |
+| Drive health | — | `swizzin-smart.timer` → `/var/lib/swizzin/smart/*.json`; SSD wear level, HDD SMART table |
+| Traffic stats | Panel table | Today / week / 7 days / month / all time + 7-day chart from vnstat |
 
 ## Fresh install
 
@@ -37,10 +39,15 @@ git fetch upstream
 git merge upstream/master   # resolve conflicts, then push
 ```
 
+> Apps removed from this fork that are already installed on a server keep running, but `box` can no
+> longer remove or upgrade them. Remove them with upstream swizzin **before** switching, e.g.
+> `box remove deluge rtorrent`.
+
 ## Useful checks on a server
 
 ```bash
 systemctl list-timers swizzin-smart.timer      # when SMART data last refreshed
 ls -l /var/lib/swizzin/smart/                  # one JSON per physical disk
 journalctl -u panel -n 50                      # panel errors
+vnstat -d 7                                    # the numbers behind the "Data transferred" card
 ```

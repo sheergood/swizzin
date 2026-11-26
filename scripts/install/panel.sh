@@ -87,8 +87,9 @@ bash /usr/local/bin/swizzin/nginx/panel.sh
 systemctl reload nginx
 echo_progress_done
 
-echo_progress_start "Setting up SMART collector for drive health"
+echo_progress_start "Setting up SMART collector and traffic stats"
 panel_smart_setup
+panel_vnstat_setup
 echo_progress_done
 
 echo_progress_start "Installing systemd service"

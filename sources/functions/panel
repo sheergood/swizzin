@@ -40,6 +40,14 @@ EOTMR
     systemctl start swizzin-smart.service >> ${log} 2>&1 || true
 }
 
+# vnstat feeds the dashboard's daily / weekly / monthly / all-time transfer stats.
+function panel_vnstat_setup() {
+    if ! command -v vnstat > /dev/null 2>&1; then
+        apt_install vnstat
+    fi
+    systemctl enable -q --now vnstat >> ${log} 2>&1 || true
+}
+
 function panel_smart_remove() {
     systemctl disable -q --now swizzin-smart.timer > /dev/null 2>&1
     rm -f /etc/systemd/system/swizzin-smart.service /etc/systemd/system/swizzin-smart.timer

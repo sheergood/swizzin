@@ -70,6 +70,12 @@ EOSUD
         echo_progress_done
     fi
 
+    if ! systemctl is-enabled -q vnstat 2> /dev/null; then
+        echo_progress_start "Enabling vnstat for panel traffic stats"
+        panel_vnstat_setup
+        echo_progress_done
+    fi
+
     if grep -q -E "swizzin.*/bin/sh" /etc/passwd; then
         echo_progress_start "Removing shell access for panel"
         usermod swizzin -s /usr/sbin/nologin
