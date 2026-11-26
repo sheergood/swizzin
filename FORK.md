@@ -20,12 +20,16 @@ Licensed under GPL-3.0 like upstream; every change is listed in `CHANGELOG.md` u
 ## Rolling out to production safely
 
 1. **Try it on one server first** (or a cheap VPS) before the rest.
-2. **Pin a release** instead of following `master` if you want to choose when servers change:
+2. **Pin a version** instead of following `master` if you want to choose when servers change.
+   Use a commit hash from the GitHub history, or a release tag you created on GitHub
+   (Releases → Draft a new release → tag `sheergood-1`):
    ```bash
    sudo -i
-   SWIZ_GIT_REF=tags/sheergood-1 box update
+   SWIZ_GIT_REF=13db722 box update            # a commit
+   SWIZ_GIT_REF=tags/sheergood-1 box update   # or a release tag
    ```
-   Plain `box update` follows `master` again.
+   Plain `box update` follows `master` again. The panel always tracks `master` of
+   sheergood/swizzin_dashboard but rolls itself back if an update doesn't start.
 3. What `box update` does to protect a live server:
    - apps this fork dropped are **listed, never removed** — they keep running
    - SMART / fail2ban / vnstat setup can fail without stopping the update
