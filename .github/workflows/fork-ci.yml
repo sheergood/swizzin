@@ -17,11 +17,10 @@ jobs:
                    sources/functions/* sources/globals.sh; do
             bash -n "$f" || { echo "::error file=$f::bash syntax error"; exit 1; }
           done
-      - name: shellcheck (errors only)
+      - name: shellcheck the fork's own scripts (errors only)
         run: |
-          files=$(git ls-files 'scripts/*.sh' 'sources/functions/*' setup.sh scripts/box scripts/panel-smart-collect)
-          # SC2199/SC2072 are pre-existing in upstream libtorrent/qbittorrent helpers
-          shellcheck -S error -x -e SC1091,SC2199,SC2072 $files
+          shellcheck -S error -x -e SC1091 sources/functions/panel scripts/panel-smart-collect \
+            scripts/install/panel.sh scripts/update/panel.sh scripts/upgrade/panel.sh scripts/remove/panel.sh setup.sh
       - name: python collectors
         run: python3 -m py_compile scripts/panel-f2b-collect
       - name: no dangling helper references

@@ -1,34 +1,29 @@
 # Changelog
 
-## [sheergood-1] (Nov 26 2026) — fork of 3.15.0
+## [sheergood-1] (Nov 27 2026) — fork of 3.15.0
 
-Changes in [sheergood/swizzin](https://github.com/sheergood/swizzin). See `FORK.md` for how this fork differs from upstream.
-
-### Removed
-- Every application except **autobrr, filebrowser, plex, prowlarr, qbittorrent, radarr and sonarr**, including their install/remove/upgrade/update/nginx/test scripts and helper functions (airsonic, bazarr, btsync, calibre, calibrecs, calibreweb, deluge, duckdns, emby, ffmpeg, flood, jackett, jellyfin, jfago, librespeed, lidarr, lounge, medusa, mylar, navidrome, netdata, netronome, nextcloud, nzbget, nzbhydra, ombi, organizr, quassel, qui, quota, rapidleech, rclone, rtorrent, rutorrent, sabnzbd, shellinabox, sickchill, sickgear, syncthing, tautulli, transmission, vsftpd, webmin, wireguard, x2go, xmrig, znc and leftover remove scripts for long-retired apps)
-- `scripts/rtx`, `scripts/setdisk` (quota), the deluge helper scripts and `sources/patches`
-- box: `adduser` / `deluser` / `chpasswd` and the per-user sudoers template only handle autobrr and qbittorrent
-- setup: the first picker offers nginx, qbittorrent, panel and autobrr; rTorrent/Deluge/Transmission prompts are gone
-
-### Production safety
-- box update: new panel extras (SMART, fail2ban, vnstat setup) run isolated — if one fails it prints a warning instead of aborting `box update`
-- panel upgrade: after restarting, the panel is health-checked (`/login` must answer within ~20 s); if it doesn't, `/opt/swizzin` is rolled back to the previous commit automatically, keeping `core/custom`
-- panel: switching an existing panel to the fork first saves `/root/swizzin-panel-backup-<date>.tar.gz`, and leaves the panel untouched if the fork can't be fetched
-- update: `00-fork-guard.sh` lists installed apps this fork no longer ships (they keep running; nothing is removed)
-- CI (`.github/workflows/fork-ci.yml`): bash syntax, ShellCheck errors and missing helper checks on every push
+Changes in [sheergood/swizzin](https://github.com/sheergood/swizzin). **Every upstream application
+and script is unchanged**; this fork only upgrades the panel and adds what it needs. See `FORK.md`.
 
 ### New
-- panel: Security card with fail2ban status and recent bans, fed by the root `swizzin-f2b.timer` (every 2 min, read-only towards fail2ban)
-- panel: server time, public/local IP with provider and location, and current weather at the server (configurable in `/opt/swizzin/swizzin.cfg`)
-- panel: data transferred today, yesterday, this week, last 7 days, this month and all time, plus a 7-day upload/download chart and table (from vnstat, which the panel now makes sure is enabled)
-- panel: SSDs/NVMe show wear level, life left and an estimated remaining lifetime; HDDs show a SMART attribute table (reallocated, pending, uncorrectable, CRC, spin retry, …) with the last self-test result
-- panel: liquid-glass dashboard from [sheergood/swizzin_dashboard](https://github.com/sheergood/swizzin_dashboard) — CPU, GPU, drive SMART health and wear, live network and disk I/O
-- panel: `swizzin-smart.timer` (root, every 10 min) runs `scripts/panel-smart-collect` and writes `smartctl` JSON to `/var/lib/swizzin/smart/` for the dashboard; never wakes sleeping HDDs
-- panel: `smartmontools` is installed with the panel and added to existing panels on `box update`
+- panel: liquid-glass dashboard from [sheergood/swizzin_dashboard](https://github.com/sheergood/swizzin_dashboard) — CPU, GPU, drive health and wear, live network and disk I/O; the original UI stays at `/classic`
+- panel: server time (12/24 h), public IPv4 and IPv6 with provider and location, and weather at the server or at your device
+- panel: data transferred today, yesterday, this week, last 7 days, this month and all time, plus a 7-day chart and table (vnstat, which the panel now makes sure is enabled)
+- panel: SSD/NVMe wear level with estimated remaining life; HDD SMART attribute table with last self-test
+- panel: Security card with fail2ban status and recent bans
+- panel: `swizzin-smart.timer` (root, every 10 min) runs `scripts/panel-smart-collect` → `/var/lib/swizzin/smart/`; never wakes sleeping HDDs; installs `smartmontools`
+- panel: `swizzin-f2b.timer` (root, every 2 min) runs `scripts/panel-f2b-collect` → `/var/lib/swizzin/fail2ban.json`; read-only towards fail2ban
+
+### Production safety
+- box update: the panel extras (SMART, fail2ban, vnstat setup) run isolated — a failure prints a warning instead of aborting `box update`
+- panel upgrade: after restarting, the panel is health-checked (`/login` must answer within ~20 s, honouring `PORT`/`URLBASE`); if it doesn't, `/opt/swizzin` is rolled back to the previous commit automatically, keeping `core/custom`
+- panel: switching an existing panel to the fork first saves `/root/swizzin-panel-backup-<date>.tar.gz`, and leaves the panel untouched if the fork can't be fetched
+- CI (`.github/workflows/fork-ci.yml`): bash syntax for every script, ShellCheck errors on the fork's own files, Python collector compile, missing-helper check
 
 ### Changed
 - setup: clones `sheergood/swizzin` (override with `SWIZ_REPO=...`)
 - panel: installs and upgrades from `sheergood/swizzin_dashboard` (override with `PANEL_REPO` / `PANEL_BRANCH`); existing panels are switched to the fork on `box update`, keeping `core/custom`
+- CI: the upstream `label-conflicts` workflow is removed — it only works on swizzin's own pull requests and always fails on a fork
 
 ### Fixes
 - panel: upgrade workaround now removes `/opt/swizzin/core/custom.tmp` (the path was missing its leading `/`)

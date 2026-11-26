@@ -1,6 +1,8 @@
 # sheergood/swizzin
 
 A personal fork of [swizzin/swizzin](https://github.com/swizzin/swizzin) for my seedbox servers.
+All upstream applications, `box` commands and install scripts are kept exactly as upstream —
+the fork only replaces the panel UI and adds the background collectors it reads.
 Licensed under GPL-3.0 like upstream; every change is listed in `CHANGELOG.md` under the
 `sheergood-*` entries.
 
@@ -11,11 +13,11 @@ Licensed under GPL-3.0 like upstream; every change is listed in `CHANGELOG.md` u
 | Installer source | `swizzin/swizzin` | `sheergood/swizzin` (`SWIZ_REPO` overrides) |
 | Panel source | `liaralabs/swizzin_dashboard` | `sheergood/swizzin_dashboard` (`PANEL_REPO`, `PANEL_BRANCH`) |
 | Panel UI | Bootstrap dashboard | Liquid-glass dashboard with CPU/GPU/SMART/wear/network detail; old UI at `/classic` |
-| Apps | ~60 | autobrr, filebrowser, plex, prowlarr, qbittorrent, radarr, sonarr (+ nginx, panel, letsencrypt) |
+| Apps | all | all — unchanged from upstream |
 | Drive health | — | `swizzin-smart.timer` → `/var/lib/swizzin/smart/*.json`; SSD wear level, HDD SMART table |
 | Traffic stats | Panel table | Today / week / 7 days / month / all time + 7-day chart from vnstat |
 | Security | — | fail2ban jails and recent bans (`swizzin-f2b.timer` → `/var/lib/swizzin/fail2ban.json`) |
-| Updates | — | non-fatal extras, panel backup + health check + auto-rollback, unsupported-app warning, CI |
+| Updates | — | non-fatal panel extras, panel backup + health check + auto-rollback, CI |
 
 ## Rolling out to production safely
 
@@ -25,13 +27,13 @@ Licensed under GPL-3.0 like upstream; every change is listed in `CHANGELOG.md` u
    (Releases → Draft a new release → tag `sheergood-1`):
    ```bash
    sudo -i
-   SWIZ_GIT_REF=13db722 box update            # a commit
+   SWIZ_GIT_REF=<commit> box update           # a commit hash from GitHub
    SWIZ_GIT_REF=tags/sheergood-1 box update   # or a release tag
    ```
    Plain `box update` follows `master` again. The panel always tracks `master` of
    sheergood/swizzin_dashboard but rolls itself back if an update doesn't start.
 3. What `box update` does to protect a live server:
-   - apps this fork dropped are **listed, never removed** — they keep running
+   - apps are untouched: the fork changes nothing outside the panel
    - SMART / fail2ban / vnstat setup can fail without stopping the update
    - the panel is backed up before switching to the fork, health-checked after every upgrade and
      **rolled back automatically** if it doesn't come up; the old UI stays at `/classic`
@@ -66,7 +68,8 @@ sudo box update
 ```
 
 `box update` then also switches the panel checkout in `/opt/swizzin` to
-`sheergood/swizzin_dashboard` (your `core/custom` profiles are kept) and installs the SMART timer.
+`sheergood/swizzin_dashboard` (your `core/custom` profiles are kept) and installs the SMART and
+fail2ban timers. Nothing else on the server changes.
 
 ## Pulling upstream fixes later
 
@@ -75,10 +78,6 @@ git remote add upstream https://github.com/swizzin/swizzin.git
 git fetch upstream
 git merge upstream/master   # resolve conflicts, then push
 ```
-
-> Apps removed from this fork that are already installed on a server keep running, but `box` can no
-> longer remove or upgrade them. Remove them with upstream swizzin **before** switching, e.g.
-> `box remove deluge rtorrent`.
 
 ## Panel settings (`/opt/swizzin/swizzin.cfg`, then `systemctl restart panel`)
 

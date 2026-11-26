@@ -169,7 +169,7 @@ function _option_parse() {
 
     if [[ ${#installArray[@]} -gt 0 ]]; then
         echo_info "Application install picker will be skipped"
-        priority=(nginx qbittorrent)
+        priority=(nginx rtorrent deluge qbittorrent)
         for i in "${installArray[@]}"; do
             #shellcheck disable=SC2199,SC2076
             if [[ " ${priority[@]} " =~ " ${i} " ]]; then
@@ -247,7 +247,7 @@ function _choices() {
     packages=()
     extras=()
     guis=()
-    locks=(nginx qbittorrent panel autobrr)
+    locks=(nginx rtorrent deluge qbittorrent panel autobrr vsftpd ffmpeg quota transmission)
     for i in "${locks[@]}"; do
         app=${i}
         if [[ ! -f /install/.$app.lock ]]; then
@@ -256,6 +256,21 @@ function _choices() {
     done
     whiptail --title "Install Software" --checklist --noitem --separate-output "Choose your clients and core features." 15 26 7 "${packages[@]}" 2> /root/results || exit 1
     results=/root/results
+    if grep -q rtorrent "$results"; then
+        gui=(rutorrent flood)
+        for i in "${gui[@]}"; do
+            app=${i}
+            if [[ ! -f /install/.$app.lock ]]; then
+                guis+=("$i" '""')
+            fi
+        done
+        whiptail --title "rTorrent GUI" --checklist --noitem --separate-output "Optional: Select a GUI for rtorrent" 15 26 7 "${guis[@]}" 2> /root/guis || exit 1
+        readarray -t guis < /root/guis
+        for gui in "${guis[@]}"; do
+            sed -i "/rtorrent/a $gui" /root/results
+        done
+        rm -f /root/guis
+    fi
     while IFS= read -r result; do
         touch /tmp/.$result.lock
     done < "$results"
@@ -281,9 +296,31 @@ function _check_results() {
             fi
         fi
     fi
+    if grep -q rtorrent "$results"; then
+        . /etc/swizzin/sources/functions/rtorrent
+        whiptail_rtorrent
+    fi
+    if grep -q deluge "$results"; then
+        . /etc/swizzin/sources/functions/deluge
+        whiptail_deluge
+    fi
     if grep -q qbittorrent "$results"; then
         . /etc/swizzin/sources/functions/qbittorrent
         whiptail_qbittorrent
+    fi
+    if grep -q transmission "$results"; then
+        #shellcheck source=sources/functions/transmission
+        . /etc/swizzin/sources/functions/transmission
+        whiptail_transmission_source
+    fi
+
+    if [[ $(grep -s rutorrent "$gui") ]] && [[ ! $(grep -s nginx "$results") ]]; then # Check nginx requirement for more than rutorrent
+        if (whiptail --title "nginx conflict" --yesno --yes-button "Install nginx" --no-button "Remove ruTorrent" "WARNING: The installer has detected that ruTorrent is to be installed without nginx. To continue, the installer must either install nginx or remove ruTorrent from the packages to be installed." 8 78); then
+            sed -i '1s/^/nginx\n/' /root/results
+            touch /tmp/.nginx.lock
+        else
+            sed -i '/rutorrent/d' /root/results
+        fi
     fi
 }
 
@@ -336,6 +373,11 @@ function _post() {
         fi
     fi
 
+    if [[ -f /install/.deluge.lock ]]; then
+        delugewebport=$(grep port /home/"${user}"/.config/deluge/web.conf | cut -d: -f2 | cut -d"," -f1)
+        delugedaemonport=$(grep daemon_port /home/"${user}"/.config/deluge/core.conf | cut -d: -f2 | cut -d"," -f1)
+        echo_info "Your deluge daemon port is $delugedaemonport\nYour deluge web port is $delugewebport"
+    fi
 
     if [[ -f /var/run/reboot-required ]]; then
         echo_warn "The server requires a reboot to finalise this installation. Please reboot now."
