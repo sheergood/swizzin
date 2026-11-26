@@ -1,5 +1,21 @@
 # Changelog
 
+## [sheergood-1] (Unreleased) — fork of 3.15.0
+
+Changes in [sheergood/swizzin](https://github.com/sheergood/swizzin). See `FORK.md` for how this fork differs from upstream.
+
+### New
+- panel: liquid-glass dashboard from [sheergood/swizzin_dashboard](https://github.com/sheergood/swizzin_dashboard) — CPU, GPU, drive SMART health and wear, live network and disk I/O
+- panel: `swizzin-smart.timer` (root, every 10 min) runs `scripts/panel-smart-collect` and writes `smartctl` JSON to `/var/lib/swizzin/smart/` for the dashboard; never wakes sleeping HDDs
+- panel: `smartmontools` is installed with the panel and added to existing panels on `box update`
+
+### Changed
+- setup: clones `sheergood/swizzin` (override with `SWIZ_REPO=...`)
+- panel: installs and upgrades from `sheergood/swizzin_dashboard` (override with `PANEL_REPO` / `PANEL_BRANCH`); existing panels are switched to the fork on `box update`, keeping `core/custom`
+
+### Fixes
+- panel: upgrade workaround now removes `/opt/swizzin/core/custom.tmp` (the path was missing its leading `/`)
+
 ## [3.15.0] (Feb 12 2026)
 
 ### Removed
