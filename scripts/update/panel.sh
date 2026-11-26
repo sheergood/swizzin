@@ -43,7 +43,7 @@ if [[ -f /install/.panel.lock ]]; then
 
         chown -R swizzin: /opt/swizzin
         chown -R swizzin: /opt/.venv/swizzin
-        PANEL_PREV=$(git -C /opt/swizzin rev-parse HEAD 2> /dev/null)
+        PANEL_PREV=$(sudo -u swizzin git -C /opt/swizzin rev-parse HEAD 2> /dev/null)
         export PANEL_PREV
         panel_use_fork_remote
         # Handles its own prints FYI

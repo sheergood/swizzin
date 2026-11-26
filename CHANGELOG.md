@@ -26,6 +26,7 @@ and script is unchanged**; this fork only upgrades the panel and adds what it ne
 - CI: the upstream `label-conflicts` workflow is removed — it only works on swizzin's own pull requests and always fails on a fork
 
 ### Fixes
+- panel: all git commands on `/opt/swizzin` run as the `swizzin` user — as root, git refuses the repo ("dubious ownership"), which made `box update` silently skip switching the panel to the fork and disabled the rollback
 - panel: upgrade workaround now removes `/opt/swizzin/core/custom.tmp` (the path was missing its leading `/`)
 
 ## [3.15.0] (Feb 12 2026)

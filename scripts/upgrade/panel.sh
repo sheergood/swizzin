@@ -10,7 +10,7 @@ if [[ -f /install/.panel.lock ]]; then
         setfacl -m g:swizzin:rx /home/*
         echo_progress_done
     fi
-    PANEL_PREV=${PANEL_PREV:-$(git -C /opt/swizzin rev-parse HEAD 2> /dev/null)}
+    PANEL_PREV=${PANEL_PREV:-$(sudo -u swizzin git -C /opt/swizzin rev-parse HEAD 2> /dev/null)}
     echo_progress_start "Downloading latest panel commits"
     sudo -u swizzin git -C /opt/swizzin pull >> ${log} 2>&1 || { PANELRESET=1; }
     if [[ $PANELRESET == 1 ]]; then

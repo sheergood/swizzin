@@ -5,6 +5,12 @@
 PANEL_REPO="${PANEL_REPO:-https://github.com/sheergood/swizzin_dashboard.git}"
 PANEL_BRANCH="${PANEL_BRANCH:-master}"
 
+# /opt/swizzin belongs to the swizzin user. Git (>= 2.35.2) refuses to touch a repo owned by
+# another user ("dubious ownership"), so every git call on it must run as swizzin, never as root.
+function panel_git() {
+    sudo -u swizzin git -C /opt/swizzin "$@"
+}
+
 # Install smartmontools and a root timer that feeds SMART data to the glass dashboard.
 function panel_smart_setup() {
     apt_install smartmontools
@@ -105,7 +111,7 @@ function panel_healthy() {
 # Restart the panel and roll /opt/swizzin back to $1 (a commit) if it doesn't come up.
 function panel_restart_or_rollback() {
     local previous=$1 current
-    current=$(git -C /opt/swizzin rev-parse HEAD 2> /dev/null)
+    current=$(panel_git rev-parse HEAD 2> /dev/null)
     systemctl restart panel
     if panel_healthy; then
         return 0
@@ -113,7 +119,7 @@ function panel_restart_or_rollback() {
     if [[ -n $previous && $previous != "$current" ]]; then
         echo_warn "Panel did not start on ${current:0:7}; rolling back to ${previous:0:7}"
         cp -a /opt/swizzin/core/custom /tmp/swizzin-custom.$$ 2> /dev/null
-        sudo -u swizzin git -C /opt/swizzin reset -q --hard "$previous" >> ${log} 2>&1
+        panel_git reset -q --hard "$previous" >> ${log} 2>&1
         cp -a /tmp/swizzin-custom.$$/. /opt/swizzin/core/custom/ 2> /dev/null
         rm -rf /tmp/swizzin-custom.$$
         systemctl restart panel
@@ -146,20 +152,25 @@ function panel_smart_remove() {
 # everything untouched if the fork can't be fetched.
 function panel_use_fork_remote() {
     local current backup
-    current=$(git -C /opt/swizzin remote get-url origin 2> /dev/null)
-    [[ -z $current || $current == "$PANEL_REPO" ]] && return 0
+    [[ -d /opt/swizzin/.git ]] || return 0
+    current=$(panel_git remote get-url origin 2> /dev/null)
+    if [[ -z $current ]]; then
+        echo_warn "Could not read the panel's git remote; leaving the panel unchanged"
+        return 0
+    fi
+    [[ $current == "$PANEL_REPO" ]] && return 0
     echo_progress_start "Switching panel source to $PANEL_REPO"
     backup="/root/swizzin-panel-backup-$(date +%Y%m%d-%H%M%S).tar.gz"
     tar -czf "$backup" -C /opt swizzin >> ${log} 2>&1 && echo_info "Panel backup: $backup"
-    if ! sudo -u swizzin git -C /opt/swizzin fetch "$PANEL_REPO" "$PANEL_BRANCH" >> ${log} 2>&1; then
+    if ! panel_git fetch "$PANEL_REPO" "$PANEL_BRANCH" >> ${log} 2>&1; then
         echo_warn "Could not reach $PANEL_REPO; keeping the current panel"
         return 0
     fi
     cp -a /opt/swizzin/core/custom /opt/swizzin/core/custom.tmp
-    sudo -u swizzin git -C /opt/swizzin remote set-url origin "$PANEL_REPO" >> ${log} 2>&1
-    sudo -u swizzin git -C /opt/swizzin fetch origin "$PANEL_BRANCH" >> ${log} 2>&1
-    sudo -u swizzin git -C /opt/swizzin checkout -q -B "$PANEL_BRANCH" "origin/$PANEL_BRANCH" >> ${log} 2>&1
-    sudo -u swizzin git -C /opt/swizzin reset -q --hard "origin/$PANEL_BRANCH" >> ${log} 2>&1
+    panel_git remote set-url origin "$PANEL_REPO" >> ${log} 2>&1
+    panel_git fetch origin "$PANEL_BRANCH" >> ${log} 2>&1
+    panel_git checkout -q -B "$PANEL_BRANCH" "origin/$PANEL_BRANCH" >> ${log} 2>&1
+    panel_git reset -q --hard "origin/$PANEL_BRANCH" >> ${log} 2>&1
     cp -a /opt/swizzin/core/custom.tmp/. /opt/swizzin/core/custom/ >> ${log} 2>&1
     rm -rf /opt/swizzin/core/custom.tmp
     echo_progress_done "Panel now tracks the fork"
