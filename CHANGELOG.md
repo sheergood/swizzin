@@ -1,5 +1,31 @@
 # Changelog
 
+## [sheergood-4] (Nov 27 2026)
+
+### Fixed
+- **FileBrowser Quantum still showed a browser login popup and logged you out of the dashboard.**
+  sheergood-3 still let nginx check the login itself (against `/etc/htpasswd.d/`), and Quantum's
+  share pages still answered "who am I?" with 401. Either one makes the browser forget the saved
+  swizzin login.
+  - nginx now asks the **swizzin panel** (`auth_request` → `/auth/check`) whether you're signed in:
+    exactly the check the dashboard makes, against the same password file. If you aren't, you're sent
+    to the dashboard's sign-in page and straight back to Quantum afterwards: never a browser popup.
+  - Quantum's share pages' 401 answers go out as 403, so opening a share link never signs you out.
+  - Someone signed in as another swizzin user gets a short "Not your files" page instead of Quantum
+    (it shows the main user's home folder).
+  - The account Quantum creates for you now has share, API and full file permissions on your home
+    folder (sheergood-3's could browse but not upload or share).
+  - Falls back to plain nginx basic auth if the panel isn't installed or nginx lacks auth_request.
+  - `box update` refreshes Quantum's nginx config whenever the panel is updated, and keeps the
+    previous one if nginx rejects the new one.
+- Config files carry a version (`# swizzin-fbquantum-config: 3`) so `box upgrade fbquantum` knows
+  exactly what to migrate.
+
+### Tests
+- New CI job (`.github/scripts/test-fbquantum.sh`): runs the newest stable Quantum with swizzin's
+  config and checks sign-on, admin + share permissions, browse, upload, overwrite, download, share,
+  delete, socket permissions and that nothing listens on TCP.
+
 ## [sheergood-3] (Nov 27 2026)
 
 ### Fixed

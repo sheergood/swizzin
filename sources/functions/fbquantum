@@ -68,6 +68,16 @@ fbquantum_fetch() {
 }
 
 FBQ_SOCK="/run/fbquantum/fbquantum.sock"
+# Bump when fbquantum_write_config changes; box upgrade rewrites older configs.
+#   1 = TCP port + separate Quantum login   2 = single sign-on (Nov 27 2026)
+#   3 = + share/API/file permissions for the account
+FBQ_CONFIG_VERSION=3
+
+fbquantum_config_version() {
+    local v
+    v="$(grep -oE 'swizzin-fbquantum-config: [0-9]+' "$1" 2> /dev/null | grep -oE '[0-9]+$')"
+    if [[ -n $v ]]; then echo "$v"; elif grep -q 'X-Swizzin-User' "$1" 2> /dev/null; then echo 2; else echo 1; fi
+}
 
 # Settings for /home/<user>/.config/fbquantum/config.yaml.
 #
@@ -83,6 +93,7 @@ fbquantum_write_config() {
     cat > "${confdir}/config.yaml" << CONFIG
 # FileBrowser Quantum — https://filebrowserquantum.com/en/docs/configuration/
 # Written by swizzin (box install / box upgrade fbquantum). Restart after editing: systemctl restart fbquantum
+# swizzin-fbquantum-config: ${FBQ_CONFIG_VERSION}
 http:
   socket: "${FBQ_SOCK}"         # only nginx (www-data), ${username} and root can connect
   socketFileMode: "0660"
@@ -100,8 +111,20 @@ server:
       name: "${username}"
       config:
         defaultEnabled: true
+        defaultPermissions:     # your own home folder: full access
+          view: true
+          download: true
+          create: true
+          modify: true
+          delete: true
   logging:
     - levels: "info|warning|error"
+userDefaults:                   # the account created at your first visit
+  account:
+    permissions:
+      api: true
+      share: true
+      realtime: true
 auth:
   methods:
     proxy:

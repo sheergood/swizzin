@@ -46,6 +46,11 @@ _systemd() {
 _nginx() {
     echo_progress_start "Configuring nginx"
     bash /etc/swizzin/scripts/nginx/fbquantum.sh
+    if ! nginx -t > /dev/null 2>&1; then
+        rm -f /etc/nginx/apps/fbquantum.conf /etc/nginx/snippets/fbquantum-proxy.conf
+        echo_error "nginx rejected the FileBrowser Quantum config; it was removed again. See: nginx -t"
+        exit 1
+    fi
     systemctl reload nginx
     echo_progress_done
 }

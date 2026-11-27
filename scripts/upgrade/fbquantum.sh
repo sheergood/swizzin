@@ -19,8 +19,9 @@ config="${confdir}/config.yaml"
 db="${confdir}/fbquantum.db"
 current="$(fbquantum_installed_version)"
 
+cfgver="$(fbquantum_config_version "$config")"
 migrate=false
-grep -q 'X-Swizzin-Groups' "$config" 2> /dev/null || migrate=true
+[[ $cfgver -lt $FBQ_CONFIG_VERSION ]] && migrate=true
 
 read -r latest _ <<< "$(fbquantum_latest_stable)"
 if [[ -n $latest && $latest == "$current" && $migrate == false ]]; then
@@ -43,10 +44,13 @@ fi
 
 if [[ $migrate == true ]]; then
     echo_progress_start "Switching to swizzin single sign-on (no second login, no browser popup)"
-    # Accounts made for the old separate Quantum login can't be used for single sign-on, so Quantum
-    # starts with a fresh database (your files are untouched). The old one is kept next to it.
     systemctl stop fbquantum
-    for f in "$db" "${db}-wal" "${db}-shm"; do [[ -f $f ]] && mv -f "$f" "${f/fbquantum.db/fbquantum.db.before-sso}"; done
+    if [[ $cfgver -lt 3 ]]; then
+        # Accounts from the separate Quantum login (v1), or made before share/API permissions were set
+        # (v2, Nov 27 2026 only), can't be used as-is, so Quantum starts with a fresh database. Your
+        # files are untouched; the old database is kept next to it.
+        for f in "$db" "${db}-wal" "${db}-shm"; do [[ -f $f ]] && mv -f "$f" "${f/fbquantum.db/fbquantum.db.before-sso}"; done
+    fi
     fbquantum_write_config "$username" "$confdir"
     fbquantum_write_unit "$username" "$confdir"
     bash /etc/swizzin/scripts/nginx/fbquantum.sh

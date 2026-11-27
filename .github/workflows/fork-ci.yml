@@ -41,3 +41,14 @@ jobs:
             [ -e "$f" ] || { echo "::error::missing $f"; missing=1; }
           done
           exit $missing
+
+  fbquantum:
+    # runs the newest stable FileBrowser Quantum with the config swizzin writes and checks single
+    # sign-on, file permissions, sharing and that it only listens on its private socket
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: FileBrowser Quantum setup works end to end
+        run: sudo bash .github/scripts/test-fbquantum.sh

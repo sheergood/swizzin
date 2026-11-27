@@ -79,6 +79,17 @@ EOSUD
         echo_progress_done
     fi
 
+    if [[ -f /install/.fbquantum.lock && -f /etc/swizzin/scripts/nginx/fbquantum.sh ]]; then
+        # FileBrowser Quantum signs in through the panel: refresh its nginx config for this panel
+        cp -p /etc/nginx/apps/fbquantum.conf /tmp/fbquantum.conf.prev 2> /dev/null
+        if bash /etc/swizzin/scripts/nginx/fbquantum.sh >> "$log" 2>&1 && nginx -t > /dev/null 2>&1; then
+            systemctl reload nginx
+        elif [[ -f /tmp/fbquantum.conf.prev ]]; then
+            cp -p /tmp/fbquantum.conf.prev /etc/nginx/apps/fbquantum.conf    # never leave nginx unloadable
+            echo_warn "Couldn't refresh FileBrowser Quantum's nginx config; kept the previous one"
+        fi
+    fi
+
     if [[ ! -f /etc/systemd/system/swizzin-host.timer ]]; then
         echo_progress_start "Adding host info snapshot for the panel"
         (panel_host_setup) || echo_warn "host info setup failed; memory module details and Plex now playing will be unavailable"
