@@ -1,5 +1,28 @@
 # Changelog
 
+## [sheergood-5] (Nov 27 2026)
+
+### Changed
+- **FileBrowser Quantum now signs in like the original File Browser**: open it from the dashboard and
+  you get its own login page (no browser popup); sign in with your swizzin username and password. The
+  dashboard and Quantum stay signed in independently, and logging out of Quantum takes you back to
+  its login page without touching the dashboard. Sessions last a week.
+- Why the earlier versions logged you out: the dashboard's login is saved by the browser and sent
+  with every request to the site. Quantum answers "not signed in" with HTTP 401, and a 401 to a
+  request carrying that saved login makes the browser forget it (reproduced in Chrome: one 401 from
+  Quantum and the dashboard's next request is refused). nginx now passes those answers on as 403
+  for browsers that carry the swizzin login, so the browser keeps it; everyone else still gets 401.
+- **Run `box upgrade fbquantum`** to switch over (config version 4). Quantum starts with a fresh
+  database with your swizzin login as its admin account; the previous database is kept as
+  `fbquantum.db.before-v4`. Your files are not touched.
+
+### Tests
+- Replayed in a real Chrome: dashboard login → open Quantum (login page, no popup) → wrong password
+  → log in → files → back to dashboard → Quantum still logged in → log out of Quantum → its login page;
+  the dashboard stayed signed in at every step and no 401 reached the browser.
+- CI (`test-fbquantum.sh`) now checks the password login, that a wrong password and a stray
+  `X-Swizzin-User` header get nothing, and every file operation.
+
 ## [sheergood-4] (Nov 27 2026)
 
 ### Fixed

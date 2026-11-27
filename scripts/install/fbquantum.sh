@@ -2,8 +2,9 @@
 # FileBrowser Quantum installer for swizzin (sheergood fork)
 # https://github.com/gtsteffaniak/filebrowser — the maintained successor to File Browser.
 #
-# Runs as the master user on a private unix socket and is reached through nginx at /fbquantum/. Signing
-# in to swizzin signs you in to it as well (no second login). Share links (/fbquantum/public/) stay public.
+# Runs as the master user on a private unix socket, reached through nginx at /fbquantum/. Like the
+# original File Browser it has its own login page (your swizzin username and password), separate from
+# the dashboard. Share links (/fbquantum/public/) are public.
 
 #shellcheck source=sources/functions/utils
 . /etc/swizzin/sources/functions/utils
@@ -16,6 +17,7 @@ if [[ ! -f /install/.nginx.lock ]]; then
 fi
 
 username="$(_get_master_username)"
+password="$(_get_user_password "$username")"
 confdir="/home/${username}/.config/fbquantum"
 
 _install() {
@@ -27,8 +29,11 @@ _install() {
 
 _config() {
     echo_progress_start "Configuring FileBrowser Quantum"
-    # No separate account or password: the swizzin login signs you in (see fbquantum_write_config).
     fbquantum_write_config "$username" "$confdir"
+    if ! fbquantum_set_account "$username" "$confdir" "$password" >> "$log" 2>&1; then
+        echo_error "Could not create the FileBrowser Quantum user"
+        exit 1
+    fi
     echo_progress_done
 }
 
@@ -62,4 +67,4 @@ _nginx
 
 touch /install/.fbquantum.lock
 echo_success "FileBrowser Quantum ${tag} installed"
-echo_info "Open https://your-server/fbquantum/ — you are signed in with your swizzin login"
+echo_info "Open https://your-server/fbquantum/ and sign in with your swizzin username and password"

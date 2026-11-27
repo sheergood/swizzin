@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # box upgrade fbquantum — newest stable FileBrowser Quantum, rolled back automatically if it fails to start.
-# Also moves installs from before Nov 27 2026 (TCP port + separate Quantum login) to the unix socket and
-# swizzin single sign-on, which fixes the browser login popup that logged you out of the dashboard.
+# Also moves older installs to the current setup (config version in config.yaml): private unix socket,
+# own login page like the original File Browser, and no way for it to log you out of the dashboard.
 
 #shellcheck source=sources/functions/utils
 . /etc/swizzin/sources/functions/utils
@@ -43,15 +43,17 @@ if [[ -n $latest && $latest != "$current" ]]; then
 fi
 
 if [[ $migrate == true ]]; then
-    echo_progress_start "Switching to swizzin single sign-on (no second login, no browser popup)"
+    echo_progress_start "Updating the FileBrowser Quantum setup (own login page, dashboard stays signed in)"
     systemctl stop fbquantum
-    if [[ $cfgver -lt 3 ]]; then
-        # Accounts from the separate Quantum login (v1), or made before share/API permissions were set
-        # (v2, Nov 27 2026 only), can't be used as-is, so Quantum starts with a fresh database. Your
-        # files are untouched; the old database is kept next to it.
-        for f in "$db" "${db}-wal" "${db}-shm"; do [[ -f $f ]] && mv -f "$f" "${f/fbquantum.db/fbquantum.db.before-sso}"; done
+    if [[ $cfgver -lt 4 ]]; then
+        # Accounts from earlier setups (single sign-on, Nov 27 2026) can't sign in with a password, so
+        # Quantum starts with a fresh database. Your files are untouched; the old one is kept next to it.
+        for f in "$db" "${db}-wal" "${db}-shm"; do [[ -f $f ]] && mv -f "$f" "${f/fbquantum.db/fbquantum.db.before-v4}"; done
     fi
     fbquantum_write_config "$username" "$confdir"
+    if [[ $cfgver -lt 4 ]] && ! fbquantum_set_account "$username" "$confdir" "$(_get_user_password "$username")" >> "$log" 2>&1; then
+        echo_warn "Could not create the FileBrowser Quantum account"
+    fi
     fbquantum_write_unit "$username" "$confdir"
     bash /etc/swizzin/scripts/nginx/fbquantum.sh
     echo_progress_done
@@ -68,7 +70,7 @@ else
     [[ -f ${FBQ_BIN}.bak ]] && mv -f "${FBQ_BIN}.bak" "$FBQ_BIN"
     [[ -f ${db}.pre-upgrade ]] && cp -p "${db}.pre-upgrade" "$db"
     if [[ $migrate == true ]]; then
-        for f in "${db}.before-sso" "${db}.before-sso-wal" "${db}.before-sso-shm"; do [[ -f $f ]] && mv -f "$f" "${f/fbquantum.db.before-sso/fbquantum.db}"; done
+        for f in "${db}.before-v4" "${db}.before-v4-wal" "${db}.before-v4-shm"; do [[ -f $f ]] && mv -f "$f" "${f/fbquantum.db.before-v4/fbquantum.db}"; done
         [[ -f ${config}.pre-upgrade ]] && cp -p "${config}.pre-upgrade" "$config"
         [[ -f /tmp/fbquantum.service.pre-upgrade ]] && cp -p /tmp/fbquantum.service.pre-upgrade /etc/systemd/system/fbquantum.service
         [[ -f /tmp/fbquantum.nginx.pre-upgrade ]] && cp -p /tmp/fbquantum.nginx.pre-upgrade /etc/nginx/apps/fbquantum.conf

@@ -71,7 +71,8 @@ FBQ_SOCK="/run/fbquantum/fbquantum.sock"
 # Bump when fbquantum_write_config changes; box upgrade rewrites older configs.
 #   1 = TCP port + separate Quantum login   2 = single sign-on (Nov 27 2026)
 #   3 = + share/API/file permissions for the account
-FBQ_CONFIG_VERSION=3
+#   4 = own login page like the original File Browser (no single sign-on)
+FBQ_CONFIG_VERSION=4
 
 fbquantum_config_version() {
     local v
@@ -81,11 +82,11 @@ fbquantum_config_version() {
 
 # Settings for /home/<user>/.config/fbquantum/config.yaml.
 #
-# Sign-in is single sign-on through swizzin: nginx checks the swizzin login (the same browser login the
-# dashboard uses) and passes the user name in X-Swizzin-User. Quantum must never answer a signed-in
-# browser with 401 of its own: browsers treat that as "the cached swizzin password is wrong", forget
-# it and log you out of the dashboard too. Quantum therefore listens only on a unix socket that just
-# nginx (group www-data), the master user and root can open, so nobody else can send that header.
+# Works like the original File Browser in swizzin: its own login page, its own session, separate from
+# the dashboard. Signing in or out of one never affects the other (nginx makes sure Quantum's
+# "not signed in" answers can't make the browser forget the dashboard login; see scripts/nginx).
+# Quantum listens only on a unix socket that just nginx (group www-data), the master user and root
+# can open.
 fbquantum_write_config() {
     local username="$1" confdir="$2" wwwgid
     wwwgid="$(getent group www-data | cut -d: -f3)"
@@ -119,25 +120,32 @@ server:
           delete: true
   logging:
     - levels: "info|warning|error"
-userDefaults:                   # the account created at your first visit
+userDefaults:                   # permissions for the account swizzin creates
   account:
     permissions:
       api: true
       share: true
       realtime: true
 auth:
+  tokenExpirationHours: 168     # stay signed in for a week (the page also renews it while open)
   methods:
-    proxy:
-      enabled: true
-      header: "X-Swizzin-User"  # set by nginx after the swizzin login
-      groupsClaim: "X-Swizzin-Groups"
-      adminGroup: "swizzin-admin"
-      logoutRedirectUrl: "/logout"
     password:
-      enabled: false            # sign-in is the swizzin login; there is no separate password to leak
+      enabled: true
+      minLength: 5
+      signup: false
+      adminUsername: "${username}"
 CONFIG
     chown -R "${username}:" "$confdir"
     chmod 700 "$confdir"
+}
+
+# Creates (or resets) the Quantum account with the swizzin username and password. The password goes in
+# through the environment and stdin only, so it never appears in the process list, the config or the
+# log. Without FILEBROWSER_ADMIN_PASSWORD the first run would invent a random one and force a change.
+fbquantum_set_account() {
+    local username="$1" confdir="$2" password="$3"
+    (cd "$confdir" && printf '%s' "$password" | FILEBROWSER_ADMIN_PASSWORD="$password" \
+        runuser -u "$username" -- "$FBQ_BIN" -c "${confdir}/config.yaml" user set "$username" --password --admin)
 }
 
 fbquantum_write_unit() {
