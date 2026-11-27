@@ -1,5 +1,18 @@
 # Changelog
 
+## [sheergood-8] (Nov 28 2026)
+
+### Added
+- `panel-host-collect` also finds each user's qBittorrent Web UI port and autobrr address (plus an
+  autobrr API key, but only one whose name contains "dashboard", "panel" or "swizzin") for the
+  dashboard's Torrent racing card. Same safeguards as before: no symlinks, files must belong to
+  that user, values strictly checked.
+- **Crash alert**: if the panel crashes repeatedly and systemd stops restarting it,
+  `swizzin-panel-alert.service` (OnFailure of panel.service) posts one message to the Discord
+  webhook saved in the panel's alert settings. `box update` installs it on existing servers and now
+  refreshes the collector right away.
+- `panel_host_remove` also removes arr.json and the crash-alert units.
+
 ## [sheergood-7] (Nov 27 2026)
 
 ### Added

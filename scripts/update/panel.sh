@@ -78,10 +78,13 @@ if [[ -f /install/.panel.lock ]]; then
         fi
     fi
 
-    if [[ ! -f /etc/systemd/system/swizzin-host.timer ]]; then
-        echo_progress_start "Adding host info snapshot for the panel"
+    if [[ ! -f /etc/systemd/system/swizzin-host.timer ]] || [[ ! -f /etc/systemd/system/swizzin-panel-alert.service ]]; then
+        echo_progress_start "Adding host info snapshot and crash alert for the panel"
         (panel_host_setup) || echo_warn "host info setup failed; memory module details and Plex now playing will be unavailable"
         echo_progress_done
+    else
+        # refresh what the dashboard reads (app addresses/keys) right away instead of within the hour
+        systemctl start swizzin-host.service > /dev/null 2>&1 || true
     fi
 
     if ! systemctl is-enabled -q vnstat 2> /dev/null; then

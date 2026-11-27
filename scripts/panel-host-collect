@@ -4,8 +4,10 @@
 #   /var/lib/swizzin/hostinfo.json  memory modules from dmidecode (needs root), world-readable
 #   /var/lib/swizzin/plex-token     Plex's local API token, readable only by the panel (root:swizzin 0640),
 #                                   so the panel can show "Now playing". Removed when Plex isn't installed.
-#   /var/lib/swizzin/arr.json       Sonarr/Radarr local address + API key (root:swizzin 0640) for the panel's
-#                                   "Media queue". Removed when neither is installed.
+#   /var/lib/swizzin/arr.json       local addresses (and keys) of Sonarr/Radarr ("Media queue") and of each
+#                                   user's qBittorrent and autobrr ("Torrent racing"), root:swizzin 0640.
+#                                   autobrr is only used with an API key whose name contains "dashboard",
+#                                   "panel" or "swizzin", i.e. one made for this. Removed when none apply.
 # Read-only towards the system. Part of the sheergood/swizzin fork. Licensed under GNU GPL v3.
 import glob
 import grp
@@ -14,6 +16,7 @@ import os
 import pwd
 import re
 import shutil
+import sqlite3
 import stat
 import subprocess
 import tempfile
@@ -172,6 +175,77 @@ def arr_apps():
     return out
 
 
+def _home_users():
+    """(name, uid, home) for every /home/<name> that belongs to the user of that name."""
+    out = []
+    for home in sorted(glob.glob("/home/*")):
+        name = os.path.basename(home)
+        try:
+            pw = pwd.getpwnam(name)
+            if os.lstat(home).st_uid == pw.pw_uid and pw.pw_dir.rstrip("/") == home:
+                out.append((name, pw.pw_uid, home))
+        except (KeyError, OSError):
+            continue
+    return out
+
+
+def qbittorrent_apps():
+    """Each user's qBittorrent Web UI address (for read-only stats; needs "Bypass authentication for
+    clients on localhost" turned on in qBittorrent, which the panel reports if it isn't)."""
+    if not os.path.exists("/install/.qbittorrent.lock"):
+        return []
+    out = []
+    for name, uid, home in _home_users():
+        raw = _read_owned(os.path.join(home, ".config/qBittorrent/qBittorrent.conf"), uid)
+        if not raw:
+            continue
+        text = raw.decode("utf-8", "replace")
+        port = re.search(r"^WebUI\\Port=(\d{1,5})\s*$", text, re.M)
+        if not port or not 0 < int(port.group(1)) < 65536:
+            continue
+        https = re.search(r"^WebUI\\HTTPS\\Enabled=true\s*$", text, re.M) is not None
+        out.append({"user": name, "url": "{}://127.0.0.1:{}".format("https" if https else "http", int(port.group(1)))})
+    return out
+
+
+def autobrr_apps():
+    if not os.path.exists("/install/.autobrr.lock"):
+        return []
+    out = []
+    for name, uid, home in _home_users():
+        cdir = os.path.join(home, ".config/autobrr")
+        raw = _read_owned(os.path.join(cdir, "config.toml"), uid)
+        if not raw:
+            continue
+        text = raw.decode("utf-8", "replace")
+        port = re.search(r"^\s*port\s*=\s*(\d{1,5})\s*$", text, re.M)
+        base = re.search(r'^\s*baseUrl\s*=\s*"([^"]*)"', text, re.M)
+        if not port or not 0 < int(port.group(1)) < 65536:
+            continue
+        b = (base.group(1) if base else "").strip().rstrip("/")
+        if b and not b.startswith("/"):
+            b = "/" + b
+        if b and not re.fullmatch(r"(/[A-Za-z0-9._~-]+)+", b):
+            continue
+        key = None
+        db = os.path.join(cdir, "autobrr.db")
+        try:
+            st = os.lstat(db)
+            if stat.S_ISREG(st.st_mode) and st.st_uid == uid:
+                con = sqlite3.connect("file:{}?mode=ro".format(db), uri=True, timeout=5)
+                try:
+                    for kname, kval in con.execute("SELECT name, key FROM api_key ORDER BY created_at DESC"):
+                        if re.search(r"dashboard|panel|swizzin", kname or "", re.I) and re.fullmatch(r"[A-Za-z0-9_-]{16,128}", kval or ""):
+                            key = kval
+                            break
+                finally:
+                    con.close()
+        except (OSError, sqlite3.Error):
+            pass
+        out.append({"user": name, "url": "http://127.0.0.1:{}{}".format(int(port.group(1)), b), "key": key})
+    return out
+
+
 def main():
     info = {"updated": int(time.time()), "memory": memory_modules()}
     write_atomic(OUT, json.dumps(info), 0o644)
@@ -194,6 +268,11 @@ def main():
         os.unlink(TOKEN)
 
     arr = arr_apps()
+    qbt, abr = qbittorrent_apps(), autobrr_apps()
+    if qbt:
+        arr["qbittorrent"] = qbt
+    if abr:
+        arr["autobrr"] = abr
     if arr and gid is not None:
         body = json.dumps(arr, sort_keys=True)
         try:

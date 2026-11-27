@@ -85,7 +85,8 @@ function panel_f2b_remove() {
 }
 
 # Root timer for things only root can read: memory module details (dmidecode) for the server specs
-# popover, and Plex's local token (0640 root:swizzin) for the "Now playing" card.
+# popover, Plex's local token and the local addresses/keys of Sonarr, Radarr, qBittorrent and autobrr
+# (0640 root:swizzin) for the dashboard's cards. Also the Discord alert sent if the panel crashes.
 function panel_host_setup() {
     mkdir -p /var/lib/swizzin
     command -v dmidecode > /dev/null 2>&1 || apt_install dmidecode
@@ -112,6 +113,23 @@ OnUnitActiveSec=1h
 WantedBy=timers.target
 EOTMR
 
+    # If the panel crashes repeatedly and systemd stops restarting it, tell the admin on Discord
+    # (the webhook from the panel's alert settings). The panel can't report its own death.
+    cat > /etc/systemd/system/swizzin-panel-alert.service << 'EOALERT'
+[Unit]
+Description=Tell the swizzin admin that the panel stopped (Discord)
+
+[Service]
+Type=oneshot
+User=swizzin
+ExecStart=/usr/bin/python3 /etc/swizzin/scripts/panel-alert
+EOALERT
+    mkdir -p /etc/systemd/system/panel.service.d
+    cat > /etc/systemd/system/panel.service.d/alert.conf << 'EOALERTDROP'
+[Unit]
+OnFailure=swizzin-panel-alert.service
+EOALERTDROP
+
     systemctl daemon-reload
     systemctl enable -q --now swizzin-host.timer >> ${log} 2>&1
     systemctl start swizzin-host.service >> ${log} 2>&1 || true
@@ -120,7 +138,9 @@ EOTMR
 function panel_host_remove() {
     systemctl disable -q --now swizzin-host.timer > /dev/null 2>&1
     rm -f /etc/systemd/system/swizzin-host.service /etc/systemd/system/swizzin-host.timer \
-        /var/lib/swizzin/hostinfo.json /var/lib/swizzin/plex-token
+        /etc/systemd/system/swizzin-panel-alert.service /etc/systemd/system/panel.service.d/alert.conf \
+        /var/lib/swizzin/hostinfo.json /var/lib/swizzin/plex-token /var/lib/swizzin/arr.json
+    rmdir /etc/systemd/system/panel.service.d 2> /dev/null || true
     systemctl daemon-reload
 }
 

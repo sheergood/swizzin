@@ -1,0 +1,44 @@
+#!/usr/bin/env python3
+# swizzin panel — crash alert
+# Started by systemd (OnFailure of panel.service) when the panel has crashed and stopped restarting.
+# The panel can't report its own death, so this posts one message to the Discord webhook saved in the
+# panel's alert settings (/opt/swizzin/alerts.json). Runs as the swizzin user; standard library only.
+# Part of the sheergood/swizzin fork. Licensed under GNU GPL v3.
+import json
+import re
+import socket
+import sys
+import time
+import urllib.request
+
+SETTINGS = "/opt/swizzin/alerts.json"
+WEBHOOK = re.compile(r"^https://(?:(?:ptb|canary)\.)?discord(?:app)?\.com/api/webhooks/\d{5,30}/[A-Za-z0-9_-]{20,120}$")
+
+
+def main():
+    try:
+        with open(SETTINGS) as f:
+            hook = json.load(f).get("webhook") or ""
+    except (OSError, ValueError, AttributeError):
+        return 0                      # alerts not set up: nothing to do
+    if not WEBHOOK.match(hook):
+        return 0
+    host = socket.gethostname()
+    body = {"username": "swizzin · {}".format(host)[:80], "allowed_mentions": {"parse": []},
+            "embeds": [{"title": "The swizzin panel has stopped",
+                        "description": "It crashed several times in a row and systemd gave up restarting it, so the "
+                                       "dashboard and its alerts are offline. On the server run "
+                                       "`journalctl -u panel -n 50` to see why, then `systemctl restart panel`.",
+                        "color": 0xD23435, "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        "footer": {"text": host[:100]}}]}
+    req = urllib.request.Request(hook, data=json.dumps(body).encode(), method="POST",
+                                 headers={"Content-Type": "application/json", "User-Agent": "swizzin-panel-alert"})
+    try:
+        urllib.request.urlopen(req, timeout=15).close()
+    except Exception as e:  # noqa: BLE001 - report, never fail the unit noisily
+        print("couldn't send the crash alert: {}".format(e), file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
