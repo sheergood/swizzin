@@ -78,13 +78,23 @@ if [[ -f /install/.panel.lock ]]; then
         fi
     fi
 
-    if [[ ! -f /etc/systemd/system/swizzin-host.timer ]] || [[ ! -f /etc/systemd/system/swizzin-panel-alert.service ]]; then
-        echo_progress_start "Adding host info snapshot and crash alert for the panel"
+    # Torrent racing and Discord alerts were added then removed (sheergood-8/9): take away what a
+    # server that updated in between got - the crash-alert units, the saved webhook and the racing data.
+    if [[ -f /etc/systemd/system/swizzin-panel-alert.service ]] || [[ -f /etc/systemd/system/panel.service.d/alert.conf ]]; then
+        rm -f /etc/systemd/system/swizzin-panel-alert.service /etc/systemd/system/panel.service.d/alert.conf
+        rmdir /etc/systemd/system/panel.service.d 2> /dev/null || true
+        systemctl daemon-reload
+    fi
+    rm -f /opt/swizzin/alerts.json /opt/swizzin/alerts.json.tmp /opt/swizzin/alerts-state.json \
+        /opt/swizzin/alerts-state.json.tmp /opt/swizzin/racing.json /opt/swizzin/racing.json.tmp
+    if grep -qE '"(qbittorrent|autobrr)"' /var/lib/swizzin/arr.json 2> /dev/null; then
+        systemctl start swizzin-host.service > /dev/null 2>&1 || true    # rewrites it without qBittorrent/autobrr
+    fi
+
+    if [[ ! -f /etc/systemd/system/swizzin-host.timer ]]; then
+        echo_progress_start "Adding host info snapshot for the panel"
         (panel_host_setup) || echo_warn "host info setup failed; memory module details and Plex now playing will be unavailable"
         echo_progress_done
-    else
-        # refresh what the dashboard reads (app addresses/keys) right away instead of within the hour
-        systemctl start swizzin-host.service > /dev/null 2>&1 || true
     fi
 
     if ! systemctl is-enabled -q vnstat 2> /dev/null; then

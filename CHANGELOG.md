@@ -1,5 +1,15 @@
 # Changelog
 
+## [sheergood-9] (Nov 28 2026)
+
+### Removed
+- qBittorrent/autobrr discovery and the Discord crash alert (sheergood-8), on request: not needed.
+  `box update` cleans up servers that updated in between: removes `swizzin-panel-alert.service`
+  and the panel's OnFailure drop-in, deletes the panel's saved alert settings (including the
+  Discord webhook) and racing data, and rewrites `/var/lib/swizzin/arr.json` without the
+  qBittorrent and autobrr entries.
+- Kept from sheergood-8: `panel_host_remove` also deletes `/var/lib/swizzin/arr.json`.
+
 ## [sheergood-8] (Nov 28 2026)
 
 ### Added
