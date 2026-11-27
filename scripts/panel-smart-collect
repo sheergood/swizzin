@@ -29,6 +29,25 @@ for dev in /sys/block/*; do
     mv -f "$tmp" "$out/$name.json"
 done
 
+# physical disks behind hardware RAID controllers (MegaRAID/PERC, HP Smart Array, Adaptec, Areca, 3ware, …):
+# the OS only sees the controller's virtual volume, so ask smartctl which pass-through devices exist.
+while read -r dev flag dtype _; do
+    [[ $flag == "-d" ]] || continue
+    case $dtype in megaraid,* | cciss,* | aacraid,* | areca,* | 3ware,* | hpt,* | sssraid,*) ;; *) continue ;; esac
+    name="hw-${dtype//,/-}"
+    name=${name//\//-}
+    seen+="$name.json "
+    tmp=$(mktemp "$out/.${name}.XXXXXX")
+    smartctl -j -a -n standby -d "$dtype" "$dev" > "$tmp" 2> /dev/null
+    rc=$?
+    if ((rc & 3)) || [[ ! -s $tmp ]]; then
+        rm -f "$tmp"
+        continue
+    fi
+    chmod 644 "$tmp"
+    mv -f "$tmp" "$out/$name.json"
+done < <(smartctl --scan-open 2> /dev/null)
+
 # forget disks that were removed
 for f in "$out"/*.json; do
     [[ -e $f ]] || continue

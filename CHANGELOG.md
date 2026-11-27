@@ -14,6 +14,8 @@ and script is unchanged**; this fork only upgrades the panel and adds what it ne
 - panel: `swizzin-smart.timer` (root, every 10 min) runs `scripts/panel-smart-collect` → `/var/lib/swizzin/smart/`; never wakes sleeping HDDs; installs `smartmontools`
 - panel: `swizzin-f2b.timer` (root, every 2 min) runs `scripts/panel-f2b-collect` → `/var/lib/swizzin/fail2ban.json`; read-only towards fail2ban
 
+- panel: `panel-smart-collect` also reads SMART for disks behind hardware RAID controllers (MegaRAID/PERC, HP Smart Array, Adaptec, Areca, 3ware) found with `smartctl --scan-open`
+
 ### Production safety
 - box update: the panel extras (SMART, fail2ban, vnstat setup) run isolated — a failure prints a warning instead of aborting `box update`
 - panel upgrade: after restarting, the panel is health-checked (`/login` must answer within ~20 s, honouring `PORT`/`URLBASE`); if it doesn't, `/opt/swizzin` is rolled back to the previous commit automatically, keeping `core/custom`
