@@ -79,6 +79,12 @@ EOSUD
         echo_progress_done
     fi
 
+    if [[ ! -f /etc/systemd/system/swizzin-host.timer ]]; then
+        echo_progress_start "Adding host info snapshot for the panel"
+        (panel_host_setup) || echo_warn "host info setup failed; memory module details and Plex now playing will be unavailable"
+        echo_progress_done
+    fi
+
     if ! systemctl is-enabled -q vnstat 2> /dev/null; then
         echo_progress_start "Enabling vnstat for panel traffic stats"
         (panel_vnstat_setup) || echo_warn "vnstat setup failed; transfer stats will be unavailable"

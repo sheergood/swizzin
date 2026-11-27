@@ -84,6 +84,46 @@ function panel_f2b_remove() {
     systemctl daemon-reload
 }
 
+# Root timer for things only root can read: memory module details (dmidecode) for the server specs
+# popover, and Plex's local token (0640 root:swizzin) for the "Now playing" card.
+function panel_host_setup() {
+    mkdir -p /var/lib/swizzin
+    command -v dmidecode > /dev/null 2>&1 || apt_install dmidecode
+    cat > /etc/systemd/system/swizzin-host.service << 'EOSVC'
+[Unit]
+Description=swizzin panel host info snapshot
+Documentation=https://github.com/sheergood/swizzin
+
+[Service]
+Type=oneshot
+Nice=10
+ExecStart=/usr/bin/python3 /etc/swizzin/scripts/panel-host-collect
+EOSVC
+
+    cat > /etc/systemd/system/swizzin-host.timer << 'EOTMR'
+[Unit]
+Description=Refresh host info for the swizzin panel hourly
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target
+EOTMR
+
+    systemctl daemon-reload
+    systemctl enable -q --now swizzin-host.timer >> ${log} 2>&1
+    systemctl start swizzin-host.service >> ${log} 2>&1 || true
+}
+
+function panel_host_remove() {
+    systemctl disable -q --now swizzin-host.timer > /dev/null 2>&1
+    rm -f /etc/systemd/system/swizzin-host.service /etc/systemd/system/swizzin-host.timer \
+        /var/lib/swizzin/hostinfo.json /var/lib/swizzin/plex-token
+    systemctl daemon-reload
+}
+
 # Port the panel listens on (swizzin.cfg can override the default 8333).
 function panel_port() {
     local p

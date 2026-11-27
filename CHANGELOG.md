@@ -3,6 +3,10 @@
 ## [sheergood-2] (Nov 27 2026)
 
 ### New
+- `swizzin-host.timer` (hourly + at boot, root): `scripts/panel-host-collect` writes memory module
+  details from `dmidecode` to `/var/lib/swizzin/hostinfo.json` for the panel's server-specs popover,
+  and copies Plex's local token to `/var/lib/swizzin/plex-token` (`root:swizzin 0640`, removed when
+  Plex is uninstalled) for the "Now playing" card. Added by `box update`; removed with the panel.
 - **FileBrowser Quantum** as a swizzin app: `box install fbquantum`, `box upgrade fbquantum`,
   `box remove fbquantum`. It's the maintained successor to File Browser (archived Aug 2026).
   - only ever installs `-stable` releases, checks the GitHub SHA-256 digest and that the binary runs

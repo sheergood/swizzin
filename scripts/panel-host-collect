@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+# swizzin panel — host info collector
+# Runs as root from swizzin-host.timer (hourly and at boot) and writes, for the unprivileged panel:
+#   /var/lib/swizzin/hostinfo.json  memory modules from dmidecode (needs root), world-readable
+#   /var/lib/swizzin/plex-token     Plex's local API token, readable only by the panel (root:swizzin 0640),
+#                                   so the panel can show "Now playing". Removed when Plex isn't installed.
+# Read-only towards the system. Part of the sheergood/swizzin fork. Licensed under GNU GPL v3.
+import grp
+import json
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import time
+import xml.etree.ElementTree as ET
+
+OUT = "/var/lib/swizzin/hostinfo.json"
+TOKEN = "/var/lib/swizzin/plex-token"
+PLEX_PREFS = "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Preferences.xml"
+PANEL_GROUP = "swizzin"
+
+
+def run(cmd, timeout=20):
+    try:
+        return subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              universal_newlines=True, timeout=timeout).stdout
+    except Exception:
+        return ""
+
+
+def write_atomic(path, data, mode, gid=None):
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(data)
+        os.chmod(tmp, mode)
+        if gid is not None:
+            os.chown(tmp, 0, gid)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def memory_modules():
+    """Installed DIMMs from SMBIOS type 17. Empty slots and placeholder values are skipped."""
+    if not shutil.which("dmidecode"):
+        return None
+    out = run(["dmidecode", "-t", "17"])
+    mods = []
+    for block in out.split("\n\n"):
+        if "Memory Device" not in block:
+            continue
+        f = {}
+        for line in block.splitlines():
+            if ":" in line and line.startswith("\t") and not line.startswith("\t\t"):
+                k, v = line.strip().split(":", 1)
+                f[k.strip()] = v.strip()
+        size = f.get("Size", "")
+        if not size or size.startswith(("No Module", "Not Installed", "0 ")) or size == "Unknown":
+            continue
+        m = re.match(r"(\d+)\s*(MB|GB|TB|kB)", size)
+        mult = {"kB": 1024, "MB": 2 ** 20, "GB": 2 ** 30, "TB": 2 ** 40}
+        junk = {"", "Unknown", "Not Specified", "NO DIMM", "Undefined", "To Be Filled By O.E.M.", "0000", "00000000"}
+        clean = lambda v: None if (v or "").strip() in junk or re.fullmatch(r"(0x)?0+|\[Empty\]|Manufacturer\d+|PartNum\d+", v or "") else v.strip()
+        speed = f.get("Configured Memory Speed") or f.get("Configured Clock Speed") or f.get("Speed")
+        mods.append({
+            "size": int(m.group(1)) * mult[m.group(2)] if m else None,
+            "type": clean(f.get("Type")),
+            "speed": clean(speed),
+            "manufacturer": clean(f.get("Manufacturer")),
+            "part": clean(f.get("Part Number")),
+            "slot": clean(f.get("Locator")),
+            "form": clean(f.get("Form Factor")),
+        })
+    return mods
+
+
+def plex_token():
+    if not os.path.exists("/install/.plex.lock") or not os.path.exists(PLEX_PREFS):
+        return None
+    try:
+        tok = ET.parse(PLEX_PREFS).getroot().get("PlexOnlineToken")
+    except Exception:
+        return None
+    return tok if tok and re.fullmatch(r"[A-Za-z0-9_\-]{8,64}", tok) else None
+
+
+def main():
+    info = {"updated": int(time.time()), "memory": memory_modules()}
+    write_atomic(OUT, json.dumps(info), 0o644)
+
+    tok = plex_token()
+    try:
+        gid = grp.getgrnam(PANEL_GROUP).gr_gid
+    except KeyError:
+        gid = None
+    if tok and gid is not None:
+        current = None
+        try:
+            with open(TOKEN) as f:
+                current = f.read().strip()
+        except OSError:
+            pass
+        if current != tok:
+            write_atomic(TOKEN, tok, 0o640, gid)
+    elif os.path.exists(TOKEN):
+        os.unlink(TOKEN)
+
+
+if __name__ == "__main__":
+    main()

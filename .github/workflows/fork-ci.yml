@@ -33,7 +33,7 @@ jobs:
             sources/functions/fbquantum scripts/install/fbquantum.sh scripts/upgrade/fbquantum.sh \
             scripts/remove/fbquantum.sh scripts/nginx/fbquantum.sh
       - name: python collectors
-        run: python3 -m py_compile scripts/panel-f2b-collect
+        run: python3 -m py_compile scripts/panel-f2b-collect scripts/panel-host-collect
       - name: no dangling helper references
         run: |
           missing=0

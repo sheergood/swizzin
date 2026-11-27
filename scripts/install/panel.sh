@@ -90,6 +90,7 @@ echo_progress_done
 echo_progress_start "Setting up SMART collector and traffic stats"
 (panel_smart_setup) || echo_warn "SMART collector setup failed; drive health will be unavailable"
 (panel_f2b_setup) || echo_warn "fail2ban snapshot setup failed; the Security card will be empty"
+(panel_host_setup) || echo_warn "host info setup failed; memory module details and Plex now playing will be unavailable"
 (panel_vnstat_setup) || echo_warn "vnstat setup failed; transfer stats will be unavailable"
 echo_progress_done
 
