@@ -29,7 +29,9 @@ jobs:
       - name: shellcheck the fork's own scripts (errors only)
         run: |
           shellcheck -S error -x -e SC1091 sources/functions/panel scripts/panel-smart-collect \
-            scripts/install/panel.sh scripts/update/panel.sh scripts/upgrade/panel.sh scripts/remove/panel.sh setup.sh
+            scripts/install/panel.sh scripts/update/panel.sh scripts/upgrade/panel.sh scripts/remove/panel.sh setup.sh \
+            sources/functions/fbquantum scripts/install/fbquantum.sh scripts/upgrade/fbquantum.sh \
+            scripts/remove/fbquantum.sh scripts/nginx/fbquantum.sh
       - name: python collectors
         run: python3 -m py_compile scripts/panel-f2b-collect
       - name: no dangling helper references

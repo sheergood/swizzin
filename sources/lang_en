@@ -18,6 +18,7 @@ $L['DELUGE'] = 'Deluge is a lightweight, Free Software, cross-platform BitTorren
 $L['DUCKDNS'] = 'An installer for a cron-job for the free dynamic DNS solution ';
 $L['EMBY'] = 'Emby Server is a client-server software package that lets consumers host their legal personal copies of multimedia — music, video and picture files. ... The Emby client software is an app you need to install on mobile devices and certain settop boxes for televisions, like Android TV.';
 $L['FFMPEG'] = 'A complete, cross-platform solution to record, convert and stream audio and video.';
+$L['FBQUANTUM'] = 'FileBrowser Quantum: modern web file manager (the maintained successor to File Browser).';
 $L['FILEBROWSER'] = 'A file manager that allows access, editing, and basic file and folder functions from a web browser.';
 $L['FLOOD'] = 'A web frontend for rtorrent with a focus on simplicity and a pleasant GUI.';
 $L['HEADPHONES'] = 'A music download manager.';

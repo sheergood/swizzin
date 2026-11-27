@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+# Helpers for FileBrowser Quantum (https://github.com/gtsteffaniak/filebrowser), shared by the
+# install and upgrade scripts. Only "-stable" releases are used; betas are skipped.
+
+FBQ_REPO="gtsteffaniak/filebrowser"
+FBQ_BIN="/opt/fbquantum/filebrowser"
+
+fbquantum_asset() {
+    case "$(_os_arch)" in
+        amd64) echo "linux-amd64-filebrowser" ;;
+        arm64) echo "linux-arm64-filebrowser" ;;
+        armhf) echo "linux-arm-7-filebrowser" ;;
+        *) return 1 ;;
+    esac
+}
+
+# Prints "<tag> <download url> <sha256 or empty>" for the newest stable release.
+fbquantum_latest_stable() {
+    local asset json
+    asset="$(fbquantum_asset)" || { echo_error "$(_os_arch) is not supported by FileBrowser Quantum" >&2; return 1; }
+    command -v jq > /dev/null 2>&1 || apt_install jq >&2
+    json="$(curl -fsSL --retry 3 -m 60 "https://api.github.com/repos/${FBQ_REPO}/releases?per_page=40")" || return 1
+    jq -r --arg a "$asset" '
+        [ .[] | select((.tag_name | endswith("-stable")) and (.draft | not)) ][0]
+        | . as $r | ($r.assets[] | select(.name == $a)) as $f
+        | "\($r.tag_name) \($f.browser_download_url) \(($f.digest // "") | sub("^sha256:"; ""))"' <<< "$json"
+}
+
+fbquantum_installed_version() {
+    [[ -x $FBQ_BIN ]] && "$FBQ_BIN" version 2> /dev/null | awk '/Version/ {print $3; exit}'
+}
+
+# Downloads the newest stable binary, checks it, and installs it to $FBQ_BIN. Prints only the tag on
+# stdout (messages go to stderr), so callers can use tag="$(fbquantum_fetch)".
+# The previous binary is kept as $FBQ_BIN.bak so a failed upgrade can be rolled back.
+fbquantum_fetch() {
+    local tag url sum tmp
+    read -r tag url sum <<< "$(fbquantum_latest_stable)"
+    if [[ -z $tag || -z $url || $url == null ]]; then
+        echo_error "Could not find a stable FileBrowser Quantum release for $(_os_arch)" >&2
+        return 1
+    fi
+    tmp="$(mktemp)"
+    echo_log_only "Downloading FileBrowser Quantum ${tag} from ${url}" >&2
+    if ! curl -fsSL --retry 3 -m 600 -o "$tmp" "$url" >> "${log:-/dev/null}" 2>&1; then
+        rm -f "$tmp"
+        echo_error "Download of FileBrowser Quantum ${tag} failed" >&2
+        return 1
+    fi
+    if [[ -n $sum ]] && ! echo "${sum}  ${tmp}" | sha256sum -c --quiet - >> "${log:-/dev/null}" 2>&1; then
+        rm -f "$tmp"
+        echo_error "Checksum mismatch for FileBrowser Quantum ${tag}; nothing was changed" >&2
+        return 1
+    fi
+    chmod 755 "$tmp"
+    if ! "$tmp" version 2> /dev/null | grep -q "Version"; then
+        rm -f "$tmp"
+        echo_error "The downloaded FileBrowser Quantum binary does not run on this system; nothing was changed" >&2
+        return 1
+    fi
+    mkdir -p /opt/fbquantum
+    [[ -f $FBQ_BIN ]] && cp -p "$FBQ_BIN" "${FBQ_BIN}.bak"
+    mv -f "$tmp" "$FBQ_BIN"
+    chown root:root "$FBQ_BIN"
+    chmod 755 "$FBQ_BIN"
+    echo_log_only "Installed FileBrowser Quantum ${tag}" >&2
+    echo "$tag"
+}
+
+fbquantum_port() {
+    awk '/^http:/ {h=1; next} h && /^[^ ]/ {h=0} h && $1 == "port:" {print $2; exit}' "$1"
+}
+
+# Waits up to ~30 s for the web UI to answer on its local port.
+fbquantum_healthy() {
+    local port="$1" _
+    for _ in $(seq 1 30); do
+        [[ $(curl -s -o /dev/null -m 3 -w '%{http_code}' "http://127.0.0.1:${port}/fbquantum/") == 200 ]] && return 0
+        sleep 1
+    done
+    return 1
+}

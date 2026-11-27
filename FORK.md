@@ -71,6 +71,18 @@ sudo box update
 `sheergood/swizzin_dashboard` (your `core/custom` profiles are kept) and installs the SMART and
 fail2ban timers. Nothing else on the server changes.
 
+## Extra app: FileBrowser Quantum
+
+```bash
+box install fbquantum     # newest stable release, at https://your-server/fbquantum/
+box upgrade fbquantum     # newest stable; rolls back by itself if it fails to start
+box remove fbquantum      # removes the app and its settings, never your files
+```
+
+The original File Browser (`box install filebrowser`) still works but was archived upstream on
+Aug 31 2026 and gets no more security fixes; Quantum is its maintained successor. Both can be
+installed side by side while you move over.
+
 ## Staying up to date with the original swizzin (automatic)
 
 `.github/workflows/upstream-sync.yml` runs every Monday at 03:17 UTC (08:47 IST):

@@ -3,6 +3,18 @@
 ## [sheergood-2] (Nov 27 2026)
 
 ### New
+- **FileBrowser Quantum** as a swizzin app: `box install fbquantum`, `box upgrade fbquantum`,
+  `box remove fbquantum`. It's the maintained successor to File Browser (archived Aug 2026).
+  - only ever installs `-stable` releases, checks the GitHub SHA-256 digest and that the binary runs
+    before replacing anything; `box upgrade` keeps the old binary and database and rolls back
+    automatically if the new version doesn't start
+  - listens on 127.0.0.1 only, behind nginx at `/fbquantum/` with the swizzin login in front of its
+    own; share links (`/fbquantum/public/`) stay public
+  - runs as the master user under a hardened systemd unit; the binary is root-owned in
+    `/opt/fbquantum`; settings and database in `~/.config/fbquantum`
+  - the account uses your swizzin username and password, which are never written to the config,
+    the log or the process list
+  - `box remove fbquantum` removes the app and its settings; your files are not touched
 - weekly upstream sync (`.github/workflows/upstream-sync.yml`): merges new `swizzin/swizzin`
   commits into a test branch, runs the fork's full CI, and fast-forwards `master`/`custom` only if
   it passes; conflicts or failures open an issue and change nothing. See `FORK.md`.
