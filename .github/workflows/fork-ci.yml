@@ -3,12 +3,21 @@ name: fork-ci
 on:
   push:
   pull_request:
+  workflow_call:      # used by upstream-sync.yml to test a merge before it reaches master
+    inputs:
+      ref:
+        type: string
+        required: false
 
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: file permissions (scripts 755, sources 644)
+        run: ./.github/scripts/check-permissions.sh
       - name: bash syntax
         run: |
           set -e

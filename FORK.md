@@ -71,12 +71,29 @@ sudo box update
 `sheergood/swizzin_dashboard` (your `core/custom` profiles are kept) and installs the SMART and
 fail2ban timers. Nothing else on the server changes.
 
-## Pulling upstream fixes later
+## Staying up to date with the original swizzin (automatic)
+
+`.github/workflows/upstream-sync.yml` runs every Monday at 03:17 UTC (08:47 IST):
+
+1. merges new commits from `swizzin/swizzin` `master` into the scratch branch `upstream-sync`;
+2. runs this fork's full CI on it (file permissions, bash syntax, shellcheck, Python, helpers);
+3. only if that passes, fast-forwards `master` and `custom` (never forced). Servers pick it up on
+   their next `box update`.
+
+If the merge conflicts, CI fails, or upstream changes a GitHub workflow file (which an automated
+job isn't allowed to push), nothing is changed and an issue labelled `upstream-sync` is opened in
+this fork with the details; it closes itself once a later run succeeds. Nothing is ever sent to the
+original author. To run it now: **Actions → upstream-sync → Run workflow** (tick *test only* to
+rehearse without changing any branch). `sheergood/swizzin_dashboard` has the same job
+(Mondays 03:41 UTC) against `liaralabs/swizzin_dashboard`.
+
+Merging by hand, if an issue asks for it:
 
 ```bash
 git remote add upstream https://github.com/swizzin/swizzin.git
 git fetch upstream
-git merge upstream/master   # resolve conflicts, then push
+git merge upstream/master   # resolve conflicts, then
+git push origin HEAD:master HEAD:custom
 ```
 
 ## Panel settings (`/opt/swizzin/swizzin.cfg`, then `systemctl restart panel`)

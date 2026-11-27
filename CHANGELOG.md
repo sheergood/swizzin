@@ -1,5 +1,13 @@
 # Changelog
 
+## [sheergood-2] (Nov 27 2026)
+
+### New
+- weekly upstream sync (`.github/workflows/upstream-sync.yml`): merges new `swizzin/swizzin`
+  commits into a test branch, runs the fork's full CI, and fast-forwards `master`/`custom` only if
+  it passes; conflicts or failures open an issue and change nothing. See `FORK.md`.
+- `fork-ci` now also checks file permissions and can be called by the sync job.
+
 ## [sheergood-1] (Nov 27 2026) — fork of 3.15.0
 
 Changes in [sheergood/swizzin](https://github.com/sheergood/swizzin). **Every upstream application
