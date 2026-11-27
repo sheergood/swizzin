@@ -74,7 +74,7 @@ fail2ban timers. Nothing else on the server changes.
 ## Extra app: FileBrowser Quantum
 
 ```bash
-box install fbquantum     # newest stable release, at https://your-server/fbquantum/
+box install fbquantum     # newest stable release, at https://your-server/fbquantum/ (signed in with your swizzin login)
 box upgrade fbquantum     # newest stable; rolls back by itself if it fails to start
 box remove fbquantum      # removes the app and its settings, never your files
 ```

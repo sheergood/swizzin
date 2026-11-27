@@ -1,5 +1,25 @@
 # Changelog
 
+## [sheergood-3] (Nov 27 2026)
+
+### Fixed
+- **FileBrowser Quantum logged you out of the dashboard and showed a browser login popup.** The
+  dashboard keeps you signed in with the browser's saved swizzin login. Quantum checked its own login
+  as well and answered "not signed in" (401) to requests that carried that saved login; browsers read
+  that as "the saved password is wrong", threw it away, and so the dashboard logged out too and the
+  popup appeared.
+  - Quantum now uses **single sign-on**: nginx checks the swizzin login (the same one the dashboard
+    uses, so no popup when you're signed in) and tells Quantum who you are. No second login, and no
+    separate Quantum password to manage. Measured: a full browser session through the dashboard and
+    Quantum produces zero 401 responses and the dashboard stays signed in.
+  - Quantum now listens on a private unix socket (`/run/fbquantum/fbquantum.sock`, `0660`, group
+    www-data) instead of a TCP port, so only nginx, the master user and root can reach it; other local
+    users can't connect or pretend to be you. Share links (`/fbquantum/public/`) still work without
+    signing in and can't carry the sign-on header.
+  - **Existing installs: run `box upgrade fbquantum`.** It switches the setup over, starts Quantum with
+    a fresh database (the old one is kept as `~/.config/fbquantum/fbquantum.db.before-sso`; your files
+    are not touched), and restores everything automatically if the new setup doesn't start.
+
 ## [sheergood-2] (Nov 27 2026)
 
 ### New
@@ -12,8 +32,7 @@
   - only ever installs `-stable` releases, checks the GitHub SHA-256 digest and that the binary runs
     before replacing anything; `box upgrade` keeps the old binary and database and rolls back
     automatically if the new version doesn't start
-  - listens on 127.0.0.1 only, behind nginx at `/fbquantum/` with the swizzin login in front of its
-    own; share links (`/fbquantum/public/`) stay public
+  - (superseded in sheergood-3 by single sign-on on a unix socket)
   - runs as the master user under a hardened systemd unit; the binary is root-owned in
     `/opt/fbquantum`; settings and database in `~/.config/fbquantum`
   - the account uses your swizzin username and password, which are never written to the config,

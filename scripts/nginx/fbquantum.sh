@@ -7,26 +7,29 @@
 . /etc/swizzin/sources/functions/fbquantum
 
 username="$(cut -d: -f1 < /root/.master.info)"
-port="$(fbquantum_port "/home/${username}/.config/fbquantum/config.yaml")"
-[[ -z $port ]] && { echo_error "No port found in /home/${username}/.config/fbquantum/config.yaml"; exit 1; }
 
 cat > /etc/nginx/apps/fbquantum.conf << NGINX
-# swizzin login in front of FileBrowser Quantum's own login
+# FileBrowser Quantum: the swizzin login (same realm as the dashboard, so one sign-in covers both),
+# then the signed-in user is handed to Quantum. Its own login page is never needed.
 location /fbquantum/ {
     auth_basic "What's the password?";
     auth_basic_user_file /etc/htpasswd.d/htpasswd.${username};
+    proxy_set_header X-Swizzin-User \$remote_user;
+    proxy_set_header X-Swizzin-Groups "swizzin-admin";   # only the master's htpasswd is accepted here
     include /etc/nginx/snippets/fbquantum-proxy.conf;
 }
 # share links and the page assets they need stay reachable without the swizzin login
 location /fbquantum/public/ {
     auth_basic off;
+    proxy_set_header X-Swizzin-User "";
+    proxy_set_header X-Swizzin-Groups "";
     include /etc/nginx/snippets/fbquantum-proxy.conf;
 }
 NGINX
 
 mkdir -p /etc/nginx/snippets
 cat > /etc/nginx/snippets/fbquantum-proxy.conf << NGINX
-proxy_pass http://127.0.0.1:${port};
+proxy_pass http://unix:${FBQ_SOCK};
 proxy_http_version 1.1;
 proxy_set_header Host \$host;
 proxy_set_header X-Real-IP \$remote_addr;
@@ -35,6 +38,8 @@ proxy_set_header X-Forwarded-Proto \$scheme;
 proxy_set_header X-Forwarded-Host \$http_host;
 proxy_set_header Upgrade \$http_upgrade;
 proxy_set_header Connection \$http_connection;
+# the browser's swizzin login is for nginx only; Quantum must not see it or answer it
+proxy_set_header Authorization "";
 proxy_buffering off;               # live events and large downloads stream straight through
 proxy_request_buffering off;       # uploads go straight to disk
 client_max_body_size 0;

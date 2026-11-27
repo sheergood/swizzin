@@ -67,15 +67,97 @@ fbquantum_fetch() {
     echo "$tag"
 }
 
-fbquantum_port() {
-    awk '/^http:/ {h=1; next} h && /^[^ ]/ {h=0} h && $1 == "port:" {print $2; exit}' "$1"
+FBQ_SOCK="/run/fbquantum/fbquantum.sock"
+
+# Settings for /home/<user>/.config/fbquantum/config.yaml.
+#
+# Sign-in is single sign-on through swizzin: nginx checks the swizzin login (the same browser login the
+# dashboard uses) and passes the user name in X-Swizzin-User. Quantum must never answer a signed-in
+# browser with 401 of its own: browsers treat that as "the cached swizzin password is wrong", forget
+# it and log you out of the dashboard too. Quantum therefore listens only on a unix socket that just
+# nginx (group www-data), the master user and root can open, so nobody else can send that header.
+fbquantum_write_config() {
+    local username="$1" confdir="$2" wwwgid
+    wwwgid="$(getent group www-data | cut -d: -f3)"
+    mkdir -p "${confdir}/cache"
+    cat > "${confdir}/config.yaml" << CONFIG
+# FileBrowser Quantum — https://filebrowserquantum.com/en/docs/configuration/
+# Written by swizzin (box install / box upgrade fbquantum). Restart after editing: systemctl restart fbquantum
+http:
+  socket: "${FBQ_SOCK}"         # only nginx (www-data), ${username} and root can connect
+  socketFileMode: "0660"
+  socketGroup: "www-data"
+  unixSocketTrustedGIDs: [${wwwgid:-33}]
+  trustProxyHeaders: true
+  baseURL: "/fbquantum/"
+server:
+  disableUpdateCheck: true      # updates come from: box upgrade fbquantum
+  cacheDir: "${confdir}/cache"
+  database:
+    path: "${confdir}/fbquantum.db"
+  sources:
+    - path: "/home/${username}"
+      name: "${username}"
+      config:
+        defaultEnabled: true
+  logging:
+    - levels: "info|warning|error"
+auth:
+  methods:
+    proxy:
+      enabled: true
+      header: "X-Swizzin-User"  # set by nginx after the swizzin login
+      groupsClaim: "X-Swizzin-Groups"
+      adminGroup: "swizzin-admin"
+      logoutRedirectUrl: "/logout"
+    password:
+      enabled: false            # sign-in is the swizzin login; there is no separate password to leak
+CONFIG
+    chown -R "${username}:" "$confdir"
+    chmod 700 "$confdir"
 }
 
-# Waits up to ~30 s for the web UI to answer on its local port.
+fbquantum_write_unit() {
+    local username="$1" confdir="$2"
+    cat > /etc/systemd/system/fbquantum.service << SERVICE
+[Unit]
+Description=FileBrowser Quantum
+After=network.target
+
+[Service]
+User=${username}
+Group=${username}
+# lets the service give its socket to nginx's group
+SupplementaryGroups=www-data
+RuntimeDirectory=fbquantum
+RuntimeDirectoryMode=0711
+UMask=002
+Type=simple
+WorkingDirectory=${confdir}
+ExecStart=${FBQ_BIN} -c ${confdir}/config.yaml
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+    systemctl daemon-reload
+}
+
+# Waits up to ~30 s for the web UI to answer on its socket.
 fbquantum_healthy() {
-    local port="$1" _
+    local _ code
     for _ in $(seq 1 30); do
-        [[ $(curl -s -o /dev/null -m 3 -w '%{http_code}' "http://127.0.0.1:${port}/fbquantum/") == 200 ]] && return 0
+        code="$(curl -s -o /dev/null -m 3 -w '%{http_code}' --unix-socket "$FBQ_SOCK" "http://localhost/fbquantum/" 2> /dev/null)"
+        [[ $code == 200 ]] && return 0
         sleep 1
     done
     return 1
