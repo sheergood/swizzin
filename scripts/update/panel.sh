@@ -67,7 +67,15 @@ if [[ -f /install/.panel.lock ]]; then
         echo_progress_done
     fi
 
-    if [[ -f /install/.fbquantum.lock && -f /etc/swizzin/scripts/nginx/fbquantum.sh ]]; then
+    fbq_conf="/home/$(_get_master_username 2> /dev/null)/.config/fbquantum/config.yaml"
+    if [[ -f /install/.fbquantum.lock && -f /etc/swizzin/scripts/upgrade/fbquantum.sh && -f $fbq_conf ]] &&
+        (. /etc/swizzin/sources/functions/fbquantum && [[ $(fbquantum_config_version "$fbq_conf") -lt $FBQ_CONFIG_VERSION ]]); then
+        # Quantum's own config is older than its nginx config: move both together (with rollback),
+        # never the nginx side alone, which would leave Quantum's login unusable.
+        echo_progress_start "Updating the FileBrowser Quantum setup"
+        bash /etc/swizzin/scripts/upgrade/fbquantum.sh >> "$log" 2>&1 || echo_warn "FileBrowser Quantum setup update failed and was rolled back; see ${log}"
+        echo_progress_done
+    elif [[ -f /install/.fbquantum.lock && -f /etc/swizzin/scripts/nginx/fbquantum.sh ]]; then
         # keep FileBrowser Quantum's nginx config current (it has its own login page)
         cp -p /etc/nginx/apps/fbquantum.conf /tmp/fbquantum.conf.prev 2> /dev/null
         if bash /etc/swizzin/scripts/nginx/fbquantum.sh >> "$log" 2>&1 && nginx -t > /dev/null 2>&1; then

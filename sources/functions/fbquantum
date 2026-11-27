@@ -19,11 +19,28 @@ fbquantum_latest_stable() {
     local asset json
     asset="$(fbquantum_asset)" || { echo_error "$(_os_arch) is not supported by FileBrowser Quantum" >&2; return 1; }
     command -v jq > /dev/null 2>&1 || apt_install jq >&2
-    json="$(curl -fsSL --retry 3 -m 60 "https://api.github.com/repos/${FBQ_REPO}/releases?per_page=40")" || return 1
+    # GitHub allows 60 anonymous API calls an hour per IP; CI (shared IPs) passes its own token.
+    local auth=() code
+    [[ -n ${GITHUB_TOKEN:-} ]] && auth=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+    json="$(mktemp)"
+    code="$(curl -sSL --retry 3 -m 60 "${auth[@]}" -o "$json" -w '%{http_code}' \
+        "https://api.github.com/repos/${FBQ_REPO}/releases?per_page=40" 2> /dev/null)" || code=000
+    if [[ $code != 200 ]]; then
+        rm -f "$json"
+        if [[ $code == 403 || $code == 429 ]]; then
+            echo_error "GitHub refused the release check (HTTP ${code}, usually its hourly limit for this IP); try again in an hour" >&2
+        else
+            echo_error "Couldn't reach GitHub to check FileBrowser Quantum releases (HTTP ${code})" >&2
+        fi
+        return 1
+    fi
     jq -r --arg a "$asset" '
         [ .[] | select((.tag_name | endswith("-stable")) and (.draft | not)) ][0]
         | . as $r | ($r.assets[] | select(.name == $a)) as $f
-        | "\($r.tag_name) \($f.browser_download_url) \(($f.digest // "") | sub("^sha256:"; ""))"' <<< "$json"
+        | "\($r.tag_name) \($f.browser_download_url) \(($f.digest // "") | sub("^sha256:"; ""))"' "$json"
+    local rc=$?
+    rm -f "$json"
+    return $rc
 }
 
 fbquantum_installed_version() {

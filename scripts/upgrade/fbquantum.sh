@@ -24,7 +24,13 @@ migrate=false
 [[ $cfgver -lt $FBQ_CONFIG_VERSION ]] && migrate=true
 
 read -r latest _ <<< "$(fbquantum_latest_stable)"
-if [[ -n $latest && $latest == "$current" && $migrate == false ]]; then
+if [[ -z $latest ]]; then
+    if [[ $migrate == false ]]; then
+        echo_warn "Couldn't check for a newer FileBrowser Quantum; nothing was changed (${current:-unknown} stays)"
+        exit 0
+    fi
+    echo_info "Couldn't check for a newer FileBrowser Quantum; updating the setup and keeping ${current:-the installed version}"
+elif [[ $latest == "$current" && $migrate == false ]]; then
     echo_success "FileBrowser Quantum is already up to date (${current})"
     exit 0
 fi

@@ -1,5 +1,21 @@
 # Changelog
 
+## [sheergood-10] (Nov 28 2026)
+
+### Fixed
+- **`box update` could leave FileBrowser Quantum unable to log in.** It refreshed Quantum's nginx
+  config to the newest setup (own login page) but not Quantum's own config, which only
+  `box upgrade fbquantum` moved. Servers still on an earlier setup (Nov 27 single sign-on) ended
+  up with the two out of step. `box update` now runs the full, rollback-protected upgrade whenever
+  Quantum's config is older, and only refreshes nginx when it's already current.
+- **Release check failures are explained.** When GitHub refuses the release lookup (usually its
+  limit of 60 anonymous API calls an hour per IP) or can't be reached, install/upgrade say so
+  instead of "no stable release found"; `box upgrade fbquantum` then changes nothing, or applies
+  only pending setup changes and keeps the installed version.
+- **CI**: the FileBrowser Quantum end-to-end test failed with HTTP 403 when GitHub's anonymous API
+  limit (shared by all jobs on a runner IP) was used up. It now uses the workflow's own token and
+  stops with a clear message if the release list can't be fetched.
+
 ## [sheergood-9] (Nov 28 2026)
 
 ### Removed

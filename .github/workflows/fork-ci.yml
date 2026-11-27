@@ -51,4 +51,6 @@ jobs:
         with:
           ref: ${{ inputs.ref }}
       - name: FileBrowser Quantum setup works end to end
-        run: sudo bash .github/scripts/test-fbquantum.sh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}    # GitHub's anonymous API limit is shared by every job on the runner's IP
+        run: sudo --preserve-env=GITHUB_TOKEN bash .github/scripts/test-fbquantum.sh

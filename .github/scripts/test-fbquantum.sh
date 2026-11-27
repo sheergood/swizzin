@@ -21,7 +21,8 @@ FBQ_BIN="/tmp/fbqci/filebrowser"
 FBQ_SOCK="/tmp/fbqci/run/fbquantum.sock"
 mkdir -p /tmp/fbqci/run && chown "$u": /tmp/fbqci/run && chmod 0711 /tmp/fbqci/run
 
-read -r tag url sum <<< "$(fbquantum_latest_stable)"
+read -r tag url sum <<< "$(fbquantum_latest_stable)" || true
+[[ -n $tag && -n $url && $url != null ]] || { echo "Couldn't get the FileBrowser Quantum release list from GitHub"; exit 1; }
 echo "testing ${tag}"
 curl -fsSL --retry 3 -o "$FBQ_BIN" "$url"
 [[ -n $sum ]] && echo "${sum}  ${FBQ_BIN}" | sha256sum -c --quiet -
