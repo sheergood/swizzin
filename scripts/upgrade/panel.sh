@@ -31,5 +31,7 @@ if [[ -f /install/.panel.lock ]]; then
     echo_progress_done "Depends up-to-date"
     echo_progress_start "Restarting Panel"
     panel_restart_or_rollback "$PANEL_PREV"
+    # tighten sudo to the checked wrapper as soon as the panel code supports it
+    (panel_sudoers) || echo_warn "Couldn't update the panel's sudo rules; kept the current ones"
     echo_progress_done "Done!"
 fi

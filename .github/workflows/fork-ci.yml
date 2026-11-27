@@ -28,7 +28,7 @@ jobs:
           done
       - name: shellcheck the fork's own scripts (errors only)
         run: |
-          shellcheck -S error -x -e SC1091 sources/functions/panel scripts/panel-smart-collect \
+          shellcheck -S error -x -e SC1091 sources/functions/panel scripts/panel-smart-collect scripts/panel-systemctl \
             scripts/install/panel.sh scripts/update/panel.sh scripts/upgrade/panel.sh scripts/remove/panel.sh setup.sh \
             sources/functions/fbquantum scripts/install/fbquantum.sh scripts/upgrade/fbquantum.sh \
             scripts/remove/fbquantum.sh scripts/nginx/fbquantum.sh

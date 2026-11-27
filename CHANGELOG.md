@@ -1,5 +1,19 @@
 # Changelog
 
+## [sheergood-6] (Nov 27 2026)
+
+### Security
+- **The panel can no longer be used to become root.** Its sudo rule allowed `systemctl enable *`,
+  and `systemctl enable` accepts a path to a unit file, so anyone who took over the panel process
+  (user `swizzin`) could start a unit of their own as root. App control now goes through a small
+  root-owned wrapper, `/etc/swizzin/scripts/panel-systemctl`, which accepts only start / stop /
+  restart / enable / disable and a plain unit name (no paths, no options), and refuses ssh, systemd,
+  networking, firewall and fail2ban units.
+  - The new sudo rule (`panel_sudoers`) is written only once the installed panel uses the wrapper,
+    and only after `visudo` accepts it, so app buttons and sudo itself can't break. `box update`
+    and `box upgrade panel` apply it; older panels keep the old rule until they're updated.
+- FORK.md / CI: the wrapper is shellchecked in fork CI.
+
 ## [sheergood-5] (Nov 27 2026)
 
 ### Changed

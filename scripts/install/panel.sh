@@ -113,17 +113,7 @@ TimeoutStopSec=300
 WantedBy=multi-user.target
 EOS
 
-cat > /etc/sudoers.d/panel << EOSUD
-#Defaults  env_keep -="HOME"
-Defaults:swizzin !logfile
-Defaults:swizzin !syslog
-Defaults:swizzin !pam_session
-
-Cmnd_Alias   CMNDS = /usr/bin/quota
-Cmnd_Alias   SYSDCMNDS = /bin/systemctl start *, /bin/systemctl stop *, /bin/systemctl restart *, /bin/systemctl disable *, /bin/systemctl enable *
-
-swizzin     ALL = (ALL) NOPASSWD: CMNDS, SYSDCMNDS
-EOSUD
+panel_sudoers || echo_warn "Couldn't write the panel's sudo rules; app buttons in the panel won't work"
 
 systemctl enable -q --now panel >> ${log} 2>&1
 echo_progress_done "Panel started"

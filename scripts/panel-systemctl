@@ -1,0 +1,39 @@
+#!/bin/bash
+# The only command the panel (user swizzin) may run as root for app control.
+#   panel-systemctl <start|stop|restart|enable|disable> <unit>
+# The old sudo rule allowed "systemctl enable *", and systemctl enable accepts a path to a unit
+# file, so anyone who took over the panel process could start their own unit as root. This wrapper
+# accepts only the five actions and a plain unit name (no paths, no options), and never touches the
+# units the server needs to stay reachable.
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+
+action=${1:-}
+unit=${2:-}
+if (($# != 2)); then
+    echo "usage: panel-systemctl <start|stop|restart|enable|disable> <unit>" >&2
+    exit 2
+fi
+case "$action" in
+    start | stop | restart | enable | disable) ;;
+    *)
+        echo "panel-systemctl: action '$action' is not allowed" >&2
+        exit 2
+        ;;
+esac
+if [[ ! $unit =~ ^[A-Za-z0-9][A-Za-z0-9@._-]{0,100}$ ]]; then
+    echo "panel-systemctl: '$unit' is not a unit name" >&2
+    exit 2
+fi
+base=${unit%.service}
+case "$base" in
+    ssh | sshd | dbus | dbus-* | systemd-* | getty@* | serial-getty@* | networking | NetworkManager | cron | sudo | polkit | ufw | nftables | iptables | fail2ban)
+        echo "panel-systemctl: $unit is managed outside the panel" >&2
+        exit 3
+        ;;
+    *) ;;
+esac
+if [[ $action == enable || $action == disable ]]; then
+    exec systemctl "$action" --now -- "$unit"
+fi
+exec systemctl "$action" -- "$unit"

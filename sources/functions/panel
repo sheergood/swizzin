@@ -215,3 +215,52 @@ function panel_use_fork_remote() {
     rm -rf /opt/swizzin/core/custom.tmp
     echo_progress_done "Panel now tracks the fork"
 }
+
+# sudo rules for the panel (user swizzin). Once the installed panel calls the root-owned wrapper
+# (/etc/swizzin/scripts/panel-systemctl), the old "systemctl enable *" rule is replaced: it let
+# whoever controlled the panel process enable a unit file of their own, i.e. become root. Panels too
+# old for the wrapper keep the old rule so their app buttons don't break; the next update tightens it.
+# The file is checked with visudo before it replaces the current one, so sudo can never be broken.
+panel_sudoers() {
+    local wrapper=/etc/swizzin/scripts/panel-systemctl tmp
+    tmp=$(mktemp /etc/sudoers.d/.panel.XXXXXX) || return 1
+    if [[ -f $wrapper ]] && grep -q "panel-systemctl" /opt/swizzin/core/util.py 2> /dev/null; then
+        chown root:root "$wrapper"
+        chmod 755 "$wrapper"
+        cat > "$tmp" << EOSUD
+# managed by swizzin (panel_sudoers): app control only through the checked wrapper
+Defaults:swizzin !logfile
+Defaults:swizzin !syslog
+Defaults:swizzin !pam_session
+
+Cmnd_Alias   CMNDS = /usr/bin/quota
+Cmnd_Alias   PANELCTL = $wrapper
+
+swizzin     ALL = (root) NOPASSWD: CMNDS, PANELCTL
+EOSUD
+    else
+        cat > "$tmp" << EOSUD
+#Defaults  env_keep -="HOME"
+Defaults:swizzin !logfile
+Defaults:swizzin !syslog
+Defaults:swizzin !pam_session
+
+Cmnd_Alias   CMNDS = /usr/bin/quota
+Cmnd_Alias   SYSDCMNDS = /bin/systemctl start *, /bin/systemctl stop *, /bin/systemctl restart *, /bin/systemctl disable *, /bin/systemctl enable *
+
+swizzin     ALL = (ALL) NOPASSWD: CMNDS, SYSDCMNDS
+EOSUD
+    fi
+    chmod 440 "$tmp"
+    if ! visudo -cqf "$tmp" > /dev/null 2>&1; then
+        rm -f "$tmp"
+        echo_warn "Panel sudo rules failed validation; kept the current ones"
+        return 1
+    fi
+    if cmp -s "$tmp" /etc/sudoers.d/panel; then
+        rm -f "$tmp"
+        return 0
+    fi
+    mv -f "$tmp" /etc/sudoers.d/panel
+}
+

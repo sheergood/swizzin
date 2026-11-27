@@ -51,20 +51,8 @@ if [[ -f /install/.panel.lock ]]; then
 
     fi
 
-    if ! grep -q SYSDCMNDS /etc/sudoers.d/panel; then
-        echo_progress_start "Adding panel to sudoers"
-        cat > /etc/sudoers.d/panel << EOSUD
-#Defaults  env_keep -="HOME"
-Defaults:swizzin !logfile
-Defaults:swizzin !syslog
-Defaults:swizzin !pam_session
-
-Cmnd_Alias   CMNDS = /usr/bin/quota
-Cmnd_Alias   SYSDCMNDS = /bin/systemctl start *, /bin/systemctl stop *, /bin/systemctl restart *, /bin/systemctl disable *, /bin/systemctl enable *
-
-swizzin     ALL = (ALL) NOPASSWD: CMNDS, SYSDCMNDS
-EOSUD
-    fi
+    # sudo rules: app control through the checked wrapper once this panel supports it
+    (panel_sudoers) || echo_warn "Couldn't update the panel's sudo rules; kept the current ones"
 
     # Optional panel extras run in subshells: a failure here only warns, it never aborts box update.
     if [[ ! -f /etc/systemd/system/swizzin-smart.timer ]]; then
@@ -80,7 +68,7 @@ EOSUD
     fi
 
     if [[ -f /install/.fbquantum.lock && -f /etc/swizzin/scripts/nginx/fbquantum.sh ]]; then
-        # FileBrowser Quantum signs in through the panel: refresh its nginx config for this panel
+        # keep FileBrowser Quantum's nginx config current (it has its own login page)
         cp -p /etc/nginx/apps/fbquantum.conf /tmp/fbquantum.conf.prev 2> /dev/null
         if bash /etc/swizzin/scripts/nginx/fbquantum.sh >> "$log" 2>&1 && nginx -t > /dev/null 2>&1; then
             systemctl reload nginx
