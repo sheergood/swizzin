@@ -1,5 +1,16 @@
 # Changelog
 
+## [sheergood-7] (Nov 27 2026)
+
+### Added
+- Panel collectors feed the dashboard's new cards:
+  - `panel-f2b-collect` also writes bans per address over the last 7 days (`ips_7d`, top 500) for
+    "Bans by country".
+  - `panel-host-collect` writes `/var/lib/swizzin/arr.json` (root:swizzin 0640): the local address
+    and API key of Sonarr and Radarr for the dashboard's "Media queue". It reads each app's own
+    config.xml (path from its systemd unit), refuses symlinks and files not owned by the app's
+    user, and only accepts a plain API key, port and URL base. Removed when neither is installed.
+
 ## [sheergood-6] (Nov 27 2026)
 
 ### Security

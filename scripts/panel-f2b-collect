@@ -67,6 +67,10 @@ def main():
                     })
                 data["bans_24h"] = con.execute("SELECT COUNT(*) FROM bans WHERE timeofban > ?", (now - 86400,)).fetchone()[0]
                 data["bans_7d"] = con.execute("SELECT COUNT(*) FROM bans WHERE timeofban > ?", (now - 7 * 86400,)).fetchone()[0]
+                # bans per address over 7 days, for the dashboard's "bans by country" (top addresses only)
+                data["ips_7d"] = [[r[0], r[1]] for r in con.execute(
+                    "SELECT ip, COUNT(*) FROM bans WHERE timeofban > ? GROUP BY ip ORDER BY 2 DESC LIMIT 500",
+                    (now - 7 * 86400,)).fetchall()]
                 con.close()
             except Exception as e:
                 data["db_error"] = str(e)

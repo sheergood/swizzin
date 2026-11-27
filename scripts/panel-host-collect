@@ -4,12 +4,17 @@
 #   /var/lib/swizzin/hostinfo.json  memory modules from dmidecode (needs root), world-readable
 #   /var/lib/swizzin/plex-token     Plex's local API token, readable only by the panel (root:swizzin 0640),
 #                                   so the panel can show "Now playing". Removed when Plex isn't installed.
+#   /var/lib/swizzin/arr.json       Sonarr/Radarr local address + API key (root:swizzin 0640) for the panel's
+#                                   "Media queue". Removed when neither is installed.
 # Read-only towards the system. Part of the sheergood/swizzin fork. Licensed under GNU GPL v3.
+import glob
 import grp
 import json
 import os
+import pwd
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -18,6 +23,8 @@ import xml.etree.ElementTree as ET
 OUT = "/var/lib/swizzin/hostinfo.json"
 TOKEN = "/var/lib/swizzin/plex-token"
 PLEX_PREFS = "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Preferences.xml"
+ARR = "/var/lib/swizzin/arr.json"
+ARR_APPS = {"sonarr": "Sonarr", "radarr": "Radarr"}   # app -> config folder name
 PANEL_GROUP = "swizzin"
 
 
@@ -92,6 +99,79 @@ def plex_token():
     return tok if tok and re.fullmatch(r"[A-Za-z0-9_\-]{8,64}", tok) else None
 
 
+def _read_owned(path, uid):
+    """Read a small regular file that really belongs to the app's user: no symlinks (a user can't
+    point us at a root-only file), owner must match, at most 1 MiB."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > 1 << 20 or (uid is not None and st.st_uid != uid):
+            return None
+        with os.fdopen(fd, "rb") as f:
+            fd = None
+            return f.read()
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _arr_config(app, folder):
+    """(config.xml path, uid of the app's user) from its systemd unit, else the usual swizzin place."""
+    try:
+        with open("/etc/systemd/system/{}.service".format(app)) as f:
+            unit = f.read()
+    except OSError:
+        unit = ""
+    user = re.search(r"^User=(\S+)", unit, re.M)
+    data = re.search(r"-data=(\S+)", unit)
+    uid = None
+    if user:
+        try:
+            uid = pwd.getpwnam(user.group(1)).pw_uid
+        except KeyError:
+            return None, None
+    if data:
+        return os.path.join(data.group(1).rstrip("/"), "config.xml"), uid
+    found = sorted(glob.glob("/home/*/.config/{}/config.xml".format(folder)))
+    if not found:
+        return None, None
+    if uid is None:
+        try:
+            uid = os.stat(os.path.dirname(found[0])).st_uid
+        except OSError:
+            return None, None
+    return found[0], uid
+
+
+def arr_apps():
+    out = {}
+    for app, folder in ARR_APPS.items():
+        if not os.path.exists("/install/.{}.lock".format(app)):
+            continue
+        path, uid = _arr_config(app, folder)
+        raw = _read_owned(path, uid) if path else None
+        if not raw:
+            continue
+        try:
+            root = ET.fromstring(raw)
+        except ET.ParseError:
+            continue
+        key = (root.findtext("ApiKey") or "").strip()
+        port = (root.findtext("Port") or "").strip()
+        base = (root.findtext("UrlBase") or "").strip().rstrip("/")
+        if base and not base.startswith("/"):
+            base = "/" + base
+        if not re.fullmatch(r"[A-Za-z0-9]{20,64}", key) or not port.isdigit() or not 0 < int(port) < 65536:
+            continue
+        if base and not re.fullmatch(r"(/[A-Za-z0-9._~-]+)+", base):
+            continue
+        out[app] = {"url": "http://127.0.0.1:{}{}".format(int(port), base), "key": key}
+    return out
+
+
 def main():
     info = {"updated": int(time.time()), "memory": memory_modules()}
     write_atomic(OUT, json.dumps(info), 0o644)
@@ -112,6 +192,19 @@ def main():
             write_atomic(TOKEN, tok, 0o640, gid)
     elif os.path.exists(TOKEN):
         os.unlink(TOKEN)
+
+    arr = arr_apps()
+    if arr and gid is not None:
+        body = json.dumps(arr, sort_keys=True)
+        try:
+            with open(ARR) as f:
+                same = f.read() == body
+        except OSError:
+            same = False
+        if not same:
+            write_atomic(ARR, body, 0o640, gid)
+    elif not arr and os.path.exists(ARR):
+        os.unlink(ARR)
 
 
 if __name__ == "__main__":
