@@ -38,7 +38,7 @@ install() {
             ;;
     esac
 
-    if ! curl "$dlurl" -L -o /tmp/lidarr.tar.gz >> "$log" 2>&1; then
+    if ! curl -fL --retry 3 --retry-delay 5 "$dlurl" -o /tmp/lidarr.tar.gz >> "$log" 2>&1; then
         echo_error "Download failed, exiting"
         exit 1
     fi

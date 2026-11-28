@@ -23,7 +23,7 @@ _install_radarr() {
             ;;
     esac
 
-    if ! curl "$dlurl" -L -o /tmp/Radarr.tar.gz >> "$log" 2>&1; then
+    if ! curl -fL --retry 3 --retry-delay 5 "$dlurl" -o /tmp/Radarr.tar.gz >> "$log" 2>&1; then
         echo_error "Download failed, exiting"
         exit 1
     fi
