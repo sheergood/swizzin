@@ -42,6 +42,18 @@ function whiptail_deluge() {
                 ;;
         esac
     fi
+    # (sheergood fork) Deluge 2.0 and 2.1 import python's cgi module, which Python 3.13 (Debian 13) no longer has;
+    # they build fine and then never start. Deluge 2.2 is the first release without it.
+    case $DELUGE_VERSION in
+        2.0.x | 2.1.x)
+            local pyv
+            pyv=$(get_candidate_version python3 | cut -d. -f1-2)
+            if [[ -n $pyv ]] && dpkg --compare-versions "$pyv" ge 3.13; then
+                echo_warn "Deluge ${DELUGE_VERSION%.x} can't run on Python ${pyv}; installing Deluge 2.2 instead"
+                export DELUGE_VERSION=2.2.x
+            fi
+            ;;
+    esac
 }
 
 function whiptail_deluge_downupgrade() {
