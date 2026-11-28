@@ -36,7 +36,7 @@ jobs:
       - name: shellcheck the panel's update scripts (warnings too)
         run: shellcheck -S warning -x scripts/panel-upgrade scripts/panel-upgrade-run
       - name: python collectors
-        run: python3 -m py_compile scripts/panel-f2b-collect scripts/panel-host-collect scripts/panel-updates-check scripts/panel-upgrade-lib
+        run: python3 -m py_compile scripts/panel-f2b-collect scripts/panel-host-collect scripts/panel-updates-check scripts/panel-upgrade-lib scripts/panel-disk-collect
       - name: update check (all sources faked)
         run: python3 .github/scripts/test-panel-updates.py && python3 .github/scripts/test-f2b-collect.py
       - name: fail2ban web jails (config accepted, filters match only attacks)
@@ -105,6 +105,10 @@ jobs:
             [ -e "$f" ] || { echo "::error::missing $f"; missing=1; }
           done
           exit $missing
+      - name: disk history and usage scan (categories add up to the used space, hard links counted once)
+        run: |
+          python3 -m pyflakes scripts/panel-disk-collect .github/scripts/test-disk-collect.py 2> /dev/null || { pip install -q pyflakes && python3 -m pyflakes scripts/panel-disk-collect .github/scripts/test-disk-collect.py; }
+          python3 .github/scripts/test-disk-collect.py
       - name: rollback copies, history, holds and *arr updates (as root, with the symlink tricks a user could try)
         run: |
           pip install -q pyflakes 2> /dev/null || true

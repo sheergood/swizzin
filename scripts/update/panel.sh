@@ -61,6 +61,12 @@ if [[ -f /install/.panel.lock ]]; then
         echo_progress_done
     fi
 
+    if [[ ! -f /etc/systemd/system/swizzin-disk.timer ]]; then
+        echo_progress_start "Adding disk history and usage scan for the panel"
+        (panel_disk_setup) || echo_warn "disk history setup failed; the disk chart and usage breakdown will be unavailable"
+        echo_progress_done
+    fi
+
     if [[ ! -f /etc/systemd/system/swizzin-f2b.timer ]]; then
         echo_progress_start "Adding fail2ban snapshot for the panel"
         (panel_f2b_setup) || echo_warn "fail2ban snapshot setup failed; the Security card will be empty"

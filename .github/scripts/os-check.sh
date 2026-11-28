@@ -302,6 +302,54 @@ print(ups[0]['version'], ups[0]['url']) if ups else None" "$cur" 2> /dev/null)
     fi
 fi
 cp -r /var/lib/swizzin/upgrades/*.log /var/lib/swizzin/upgrades/history.json "$logs/" 2> /dev/null || true
+# --- 6. disk history + "what's using the disk" (swizzin-disk.timer): the sums must match df exactly
+t0=$(date +%s)
+# a container's / is an overlay, which the panel doesn't list: point the scan at it explicitly
+if systemctl is-enabled -q swizzin-disk.timer 2> /dev/null && step "disk scan" env SWZ_DISK_MOUNTS=/ python3 /etc/swizzin/scripts/panel-disk-collect --scan; then
+    note=$(python3 - << 'EOPY' 2>&1
+import json, os, stat
+u = json.load(open("/var/lib/swizzin/disk-usage.json"))
+h = json.load(open("/var/lib/swizzin/disk-history.json"))
+r = u["mounts"]["/"]
+st = os.statvfs("/")
+cats = sum(c["bytes"] for c in r["cats"])
+problems = []
+if cats + r["other"] != r["used"]:
+    problems.append("categories %d + other %d != used %d" % (cats, r["other"], r["used"]))
+if abs(r["used"] - (st.f_blocks - st.f_bfree) * st.f_frsize) > 2 * 1024 ** 3:
+    problems.append("used differs from df by over 2 GiB")
+if r["over"]:
+    problems.append("du counted more than df")
+# folders nothing else is inside of must match a du of their own, to the KiB
+import subprocess
+def alone(*paths):
+    out = subprocess.run(["du", "-sxkc", "--"] + [x for x in paths if os.path.isdir(x)], stdout=subprocess.PIPE, universal_newlines=True).stdout
+    return int(out.strip().splitlines()[-1].split()[0]) * 1024 if out.strip() else 0
+by = {c["key"]: c["bytes"] for c in r["cats"]}
+for key, paths in (("logs", ["/var/log"]), ("mediadata", ["/var/lib/jellyfin", "/var/cache/jellyfin", "/var/lib/plexmediaserver"])):
+    want = alone(*paths)
+    if want and abs(by.get(key, 0) - want) > 64 * 1024 * 1024:
+        problems.append("%s %d != du %d" % (key, by.get(key, 0), want))
+for key in (["downloads"] if os.path.isdir("/home/ci/torrents") else []) + ["apps", "system", "logs"]:
+    if not by.get(key):
+        problems.append("no " + key)
+if not h["mounts"].get("/"):
+    problems.append("no history sample")
+for f in ("/var/lib/swizzin/disk-usage.json", "/var/lib/swizzin/disk-history.json"):
+    if stat.S_IMODE(os.stat(f).st_mode) != 0o640:
+        problems.append(f + " not 0640")
+G = 1024 ** 3
+print("; ".join(problems) if problems else "took %ss; %s; other %.1f GiB" % (
+    u["took"], ", ".join("%s %.1f GiB" % (c["key"], c["bytes"] / G) for c in r["cats"]), r["other"] / G))
+EOPY
+)
+    if [[ $note == took* ]]; then row "disk usage scan (sums match df)" "✅" "$(($(date +%s) - t0))" "$(echo "$note" | clean)"; else
+        row "disk usage scan (sums match df)" "❌" "$(($(date +%s) - t0))" "$(echo "$note" | tail -n2 | tr '\n' ' ' | clean)"
+    fi
+else
+    row "disk usage scan (sums match df)" "❌" "$(($(date +%s) - t0))" "timer $(systemctl is-enabled swizzin-disk.timer 2>&1); $(tail -n3 "$logs/disk_scan.log" 2> /dev/null | tr '\n' ' ' | clean)"
+fi
+
 
 {
     echo

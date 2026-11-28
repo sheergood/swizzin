@@ -84,6 +84,49 @@ function panel_f2b_remove() {
     systemctl daemon-reload
 }
 
+# Root timer for the Memory & storage card: used space of each filesystem every 3 hours (the 30-day
+# chart and "full in about"), and what fills it (downloads, libraries, app data...) every 6 hours.
+# du runs at the lowest CPU and disk priority so torrents and streams don't notice it.
+function panel_disk_setup() {
+    mkdir -p /var/lib/swizzin
+    cat > /etc/systemd/system/swizzin-disk.service << 'EOSVC'
+[Unit]
+Description=swizzin panel disk history and usage scan
+Documentation=https://github.com/sheergood/swizzin
+
+[Service]
+Type=oneshot
+Nice=19
+IOSchedulingClass=idle
+TimeoutStartSec=1h
+ExecStart=/usr/bin/python3 /etc/swizzin/scripts/panel-disk-collect
+EOSVC
+
+    cat > /etc/systemd/system/swizzin-disk.timer << 'EOTMR'
+[Unit]
+Description=Disk history and usage for the swizzin panel, every 3 hours
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=3h
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target
+EOTMR
+
+    systemctl daemon-reload
+    systemctl enable -q --now swizzin-disk.timer >> ${log} 2>&1
+    systemctl start --no-block swizzin-disk.service >> ${log} 2>&1 || true
+}
+
+function panel_disk_remove() {
+    systemctl disable -q --now swizzin-disk.timer > /dev/null 2>&1
+    rm -f /etc/systemd/system/swizzin-disk.service /etc/systemd/system/swizzin-disk.timer \
+        /var/lib/swizzin/disk-history.json /var/lib/swizzin/disk-usage.json
+    systemctl daemon-reload
+}
+
 # Root timer for things only root can read: memory module details (dmidecode) for the server specs
 # popover, and Plex's local token (0640 root:swizzin) for the "Now playing" card.
 function panel_host_setup() {

@@ -1,0 +1,407 @@
+#!/usr/bin/env python3
+# swizzin panel — disk history and "what's using the disk" (root, standard library only)
+# Run by swizzin-disk.timer every 3 hours (and soon after boot). Writes, for the panel (root:swizzin 0640):
+#
+#   /var/lib/swizzin/disk-history.json   used / size / available of each filesystem the panel lists,
+#                                        one sample every run (at most one per 2 hours), last 90 days.
+#                                        The panel draws the last 30 days and works out the growth rate
+#                                        and "full in about" from it.
+#   /var/lib/swizzin/disk-usage.json     what fills each filesystem, rescanned when older than 6 hours:
+#                                        downloads, media libraries, Plex/Jellyfin data, apps and their
+#                                        settings, other files in home folders, logs, system, and other
+#                                        (used minus all of these: filesystem overhead and files elsewhere),
+#                                        each with its biggest folders.
+#
+# How the sizes add up: ONE `du` run gets every folder, ordered by category (downloads first) except that a
+# folder inside another is always listed before it (so a library folder inside the download folder counts
+# as a library, and app settings inside a home folder as apps). du counts each file once (hard links included) and leaves out what an
+# earlier folder already counted, so the categories never overlap and a file that's both a download and in
+# a library (an *arr hard link) is counted once, as a download. du reports blocks in use like df does, so
+# the categories and "other" add up to the filesystem's used space.
+#
+# Read-only towards the system. Runs at the lowest CPU and disk priority (see the timer's service).
+# Part of the sheergood/swizzin fork. Licensed under GNU GPL v3.
+import glob
+import grp
+import json
+import os
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.request
+import xml.etree.ElementTree as ET
+
+BASE = os.environ.get("SWZ_DISK_DIR", "/var/lib/swizzin")
+HIST = os.path.join(BASE, "disk-history.json")
+USAGE = os.path.join(BASE, "disk-usage.json")
+FS = os.environ.get("SWZ_FS", "")              # tests only: a fake filesystem root for the paths searched
+PANEL_GROUP = "swizzin"
+KEEP_DAYS = 90
+MIN_GAP = 2 * 3600 - 300                       # one sample per ~2 hours, however often this runs
+SCAN_EVERY = 6 * 3600 - 300
+DU_TIMEOUT = 45 * 60
+TOP = 8                                        # biggest folders kept per category
+USER_RE = re.compile(r"^[a-z_][a-z0-9_.-]{0,31}$")
+# folders never accepted as somebody's download or library folder (a config pointing at / would
+# otherwise claim the whole disk)
+TOO_BROAD = {"/", "/home", "/root", "/usr", "/var", "/etc", "/opt", "/boot", "/srv", "/mnt", "/media", "/tmp", "/var/lib"}
+
+CATS = [  # key, label, in the order du sees them (first claim wins)
+    ("downloads", "Downloads"),
+    ("media", "Media libraries"),
+    ("mediadata", "Plex / Jellyfin data"),
+    ("apps", "Apps and their settings"),
+    ("homes", "Other files in home folders"),
+    ("logs", "Logs"),
+    ("system", "System"),
+]
+
+
+# --------------------------------------------------------------------------- helpers
+def p(path):
+    return FS + path if FS else path
+
+
+def unp(path):
+    return path[len(FS):] or "/" if FS and path.startswith(FS) else path
+
+
+def now():
+    return int(time.time())
+
+
+def read_json(path, default):
+    try:
+        with open(path) as f:
+            v = json.load(f)
+        return v if isinstance(v, type(default)) else default
+    except (OSError, ValueError):
+        return default
+
+
+def write_public(path, data):
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-disk.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, separators=(",", ":"))
+        os.chmod(tmp, 0o640)
+        try:
+            gid = grp.getgrnam(PANEL_GROUP).gr_gid
+        except KeyError:
+            gid = None
+        if gid is not None and os.geteuid() == 0:
+            os.chown(tmp, 0, gid)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def small_text(path, limit=1 << 20):
+    """A user's config file, read without following a symlink and only if it's a small regular file."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return ""
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > limit:
+            return ""
+        with os.fdopen(fd, "rb") as f:
+            fd = None
+            return f.read(limit).decode("utf-8", "replace")
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def users():
+    out = set()
+    for f in glob.glob("/root/*.info") + ["/root/.master.info"]:
+        try:
+            with open(f) as fh:
+                u = fh.read().split(":", 1)[0].strip()
+        except OSError:
+            continue
+        if USER_RE.match(u):
+            out.add(u)
+    return sorted(out)
+
+
+# --------------------------------------------------------------------------- filesystems (as the panel lists them)
+def mounts():
+    """Same rules as the panel's Filesystems list (core/util.get_mounts)."""
+    if os.environ.get("SWZ_DISK_MOUNTS"):          # tests: a container's / is an overlay the panel doesn't list
+        return sorted(m for m in os.environ["SWZ_DISK_MOUNTS"].split(",") if m.startswith("/"))
+    found = set()
+    try:
+        with open("/proc/mounts") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 3:
+            continue
+        dev, mnt, kind = fields[0], fields[1].replace("\\040", " "), fields[2]
+        if dev.startswith("/dev") or re.match(r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}", dev) or \
+                re.match(r"^(([0-9A-Fa-f]{1,4}:){7})([0-9A-Fa-f]{1,4})$|(([0-9A-Fa-f]{1,4}:){1,6}:)(([0-9A-Fa-f]{1,4}:){0,4})([0-9A-Fa-f]{1,4})$", dev):
+            if "boot" in mnt or "fuse" in fields or "/snap/" in mnt or "/loop" in dev or "/docker" in mnt:
+                continue
+            found.add(mnt)
+        if kind == "zfs":
+            found.add(mnt)
+    try:
+        with open("/etc/fstab") as f:
+            for line in f:
+                fields = line.split()
+                if "bind" in str(fields) and len(fields) > 1:
+                    found.discard(fields[1])
+    except OSError:
+        pass
+    return sorted(found)
+
+
+def usage(mnt):
+    """(size, used, available) in bytes, as the panel and df count them."""
+    st = os.statvfs(mnt)
+    size = st.f_blocks * st.f_frsize
+    used = (st.f_blocks - st.f_bfree) * st.f_frsize
+    return size, used, st.f_bavail * st.f_frsize
+
+
+def mount_of(path, mlist):
+    """The listed filesystem a path is on (longest matching mount point)."""
+    best = None
+    for m in mlist:
+        if path == m or path.startswith(m.rstrip("/") + "/"):
+            if best is None or len(m) > len(best):
+                best = m
+    return best
+
+
+# --------------------------------------------------------------------------- history
+def record_history(mlist, t=None):
+    t = t or now()
+    h = read_json(HIST, {})
+    ms = h.get("mounts") if isinstance(h.get("mounts"), dict) else {}
+    cut = t - KEEP_DAYS * 86400
+    out = {}
+    for m in mlist:
+        pts = [x for x in (ms.get(m) or []) if isinstance(x, list) and len(x) == 4 and x[0] >= cut]
+        try:
+            size, used, avail = usage(m)
+        except OSError:
+            if pts:
+                out[m] = pts
+            continue
+        if not pts or t - pts[-1][0] >= MIN_GAP:
+            pts.append([t, used, size, avail])
+        out[m] = pts
+    write_public(HIST, {"version": 1, "mounts": out})
+    return out
+
+
+# --------------------------------------------------------------------------- where things live
+def _ini_value(text, keys):
+    out = []
+    for line in text.splitlines():
+        k, _, v = line.partition("=")
+        if k.strip() in keys and v.strip():
+            out.append(v.strip())
+    return out
+
+
+def download_dirs(u):
+    home = "/home/" + u
+    found = [home + "/torrents", home + "/Downloads", home + "/downloads"]
+    q = small_text(p(home + "/.config/qBittorrent/qBittorrent.conf"))
+    found += _ini_value(q, ("Session\\DefaultSavePath", "Downloads\\SavePath", "Session\\TempPath", "Downloads\\TempPath"))
+    d = small_text(p(home + "/.config/deluge/core.conf"))
+    for key in ("download_location", "move_completed_path"):
+        for m in re.finditer(r'"{}"\s*:\s*"([^"]+)"'.format(key), d):
+            found.append(m.group(1))
+    r = small_text(p(home + "/.rtorrent.rc"))
+    for m in re.finditer(r"^\s*directory(?:\.default(?:\.set)?)?\s*=\s*(\S+)", r, re.M):
+        found.append(m.group(1).strip('"'))
+    t = small_text(p(home + "/.config/transmission-daemon/settings.json"))
+    for key in ("download-dir", "incomplete-dir"):
+        for m in re.finditer(r'"{}"\s*:\s*"([^"]+)"'.format(key), t):
+            found.append(m.group(1))
+    return [x.replace("~", home, 1) if x.startswith("~") else x for x in found]
+
+
+def _http(url, headers=None, timeout=10):
+    req = urllib.request.Request(url, headers=dict({"Accept": "application/json"}, **(headers or {})))
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read(2 << 20)
+
+
+def media_dirs():
+    found = []
+    arr = read_json("/var/lib/swizzin/arr.json", {})
+    for app, ver in (("sonarr", "v3"), ("radarr", "v3"), ("lidarr", "v1")):
+        a = arr.get(app)
+        if not isinstance(a, dict) or not re.match(r"^http://127\.0\.0\.1:\d{1,5}(/[A-Za-z0-9._~/-]*)?$", str(a.get("url", ""))):
+            continue
+        try:
+            for r in json.loads(_http("{}/api/{}/rootfolder".format(a["url"].rstrip("/"), ver), {"X-Api-Key": str(a.get("key", ""))})):
+                if isinstance(r, dict) and r.get("path"):
+                    found.append(str(r["path"]))
+        except Exception:  # noqa: BLE001 - an app that's down just doesn't add its folders
+            pass
+    for f in glob.glob(p("/var/lib/jellyfin/root/default/*/*.mblink")):
+        line = small_text(f, 4096).strip()
+        if line:
+            found.append(line.splitlines()[0])
+    tok = small_text("/var/lib/swizzin/plex-token", 256).strip()
+    if tok and re.match(r"^[A-Za-z0-9_-]{8,64}$", tok):
+        try:
+            root = ET.fromstring(_http("http://127.0.0.1:32400/library/sections", {"X-Plex-Token": tok, "Accept": "application/xml"}))
+            for loc in root.iter("Location"):
+                if loc.get("path"):
+                    found.append(loc.get("path"))
+        except Exception:  # noqa: BLE001
+            pass
+    return found
+
+
+def category_paths(ulist):
+    """[(category, path)] before cleaning; paths as on the real system."""
+    out = []
+    for u in ulist:
+        out += [("downloads", d) for d in download_dirs(u)]
+    out += [("media", d) for d in media_dirs()]
+    out += [("mediadata", d) for d in ("/var/lib/plexmediaserver", "/var/lib/jellyfin", "/var/cache/jellyfin", "/var/lib/emby")]
+    out += [("apps", "/opt")]
+    for u in ulist:
+        out += [("apps", "/home/{}/.config".format(u)), ("apps", "/home/{}/.local".format(u))]
+    out += [("homes", "/home")]
+    out += [("logs", "/var/log")]
+    out += [("system", d) for d in ("/usr", "/var", "/etc", "/root", "/srv", "/tmp", "/bin", "/sbin", "/lib", "/lib64")]
+    return out
+
+
+def clean_paths(pairs):
+    """Real, existing folders; each once (first category wins); broad folders only for the categories
+    that are meant to hold them."""
+    seen, out = set(), []
+    for cat, path in pairs:
+        if not isinstance(path, str) or not path.startswith("/") or "\n" in path or len(path) > 1024:
+            continue
+        real = os.path.realpath(p(os.path.normpath(path)))
+        if not os.path.isdir(real):
+            continue
+        shown = unp(real)
+        if cat in ("downloads", "media") and shown in TOO_BROAD:
+            continue
+        if shown in seen:
+            continue
+        seen.add(shown)
+        out.append((cat, real))
+    return out
+
+
+def du_order(pairs):
+    """Category order, but a folder inside another always before it (du then leaves it out of the outer
+    one instead of skipping it)."""
+    rank = {k: i for i, (k, _) in enumerate(CATS)}
+    order = sorted(pairs, key=lambda cp: rank[cp[0]])
+    # stable fix-up: move any folder ahead of the first folder that contains it
+    changed = True
+    while changed:
+        changed = False
+        for i in range(len(order)):
+            for j in range(i):
+                outer, inner = order[j][1], order[i][1]
+                if inner.startswith(outer.rstrip("/") + "/"):
+                    order.insert(j, order.pop(i))
+                    changed = True
+                    break
+            if changed:
+                break
+    return order
+
+
+def run_du(paths):
+    """{path: KiB} for each folder (its own total, minus what earlier folders already counted) and for
+    each of its first-level subfolders."""
+    cmd = ["du", "-x", "-k", "-d", "1", "--"] + paths
+    try:
+        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=DU_TIMEOUT)
+        text = r.stdout.decode("utf-8", "replace")
+    except subprocess.TimeoutExpired as e:
+        text = (e.stdout or b"").decode("utf-8", "replace")
+    except OSError:
+        text = ""
+    sizes = {}
+    for line in text.splitlines():
+        kb, _, path = line.partition("\t")
+        if kb.isdigit() and path:
+            sizes[path] = int(kb) * 1024
+    return sizes
+
+
+def scan(mlist, t=None):
+    t = t or now()
+    start = time.time()
+    pairs = du_order(clean_paths(category_paths(users())))
+    sizes = run_du([path for _, path in pairs])
+    result = {}
+    for m in mlist:
+        try:
+            size, used, avail = usage(m)
+        except OSError:
+            continue
+        result[m] = {"size": size, "used": used, "avail": avail, "cats": {}, "other": 0}
+    real_mounts = {os.path.realpath(p(m)): m for m in result}
+    for cat, path in pairs:
+        m = mount_of(path, list(real_mounts))
+        if m is None or path not in sizes:
+            continue
+        m = real_mounts[m]
+        c = result[m]["cats"].setdefault(cat, {"bytes": 0, "paths": [], "top": []})
+        c["bytes"] += sizes[path]
+        c["paths"].append({"path": unp(path), "bytes": sizes[path]})
+        prefix = path.rstrip("/") + "/"
+        for sub, b in sizes.items():
+            if sub.startswith(prefix) and "/" not in sub[len(prefix):] and b > 0:
+                c["top"].append({"path": unp(sub), "bytes": b})
+    for m, r in result.items():
+        cats = []
+        for key, label in CATS:
+            c = r["cats"].get(key)
+            if not c or c["bytes"] <= 0:
+                continue
+            c["top"] = sorted(c["top"], key=lambda x: -x["bytes"])[:TOP]
+            c["paths"] = sorted(c["paths"], key=lambda x: -x["bytes"])[:TOP]
+            cats.append(dict(c, key=key, label=label))
+        counted = sum(c["bytes"] for c in cats)
+        r["cats"] = cats
+        r["other"] = max(0, r["used"] - counted)
+        # du sees more than df says is used (compression, deduplication, a file grown during the scan)
+        r["over"] = counted > r["used"] * 1.02
+    out = {"version": 1, "scanned": t, "took": round(time.time() - start, 1), "mounts": result}
+    write_public(USAGE, out)
+    return out
+
+
+def main(argv):
+    mlist = mounts()
+    record_history(mlist)
+    last = read_json(USAGE, {}).get("scanned") or 0
+    if "--scan" in argv or now() - int(last) >= SCAN_EVERY:
+        scan(mlist)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
