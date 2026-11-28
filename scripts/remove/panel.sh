@@ -16,4 +16,5 @@ panel_smart_remove
 panel_f2b_remove
 panel_host_remove
 panel_updates_remove
+panel_f2b_web_remove
 rm /install/.panel.lock

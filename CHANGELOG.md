@@ -1,5 +1,40 @@
 # Changelog
 
+## [sheergood-12] (Nov 28 2026)
+
+### Added
+- **fail2ban now blocks password guessing and scanners on the web side.** SSH's own jail is left
+  exactly as it was. Every new jail bans on ports 80/443 only, and bans double for repeat
+  offenders, up to 1 day.
+
+  | Jail | What it catches | Ban after | First ban |
+  |---|---|---|---|
+  | `swizzin-panel` | wrong panel passwords | 8 in 10 min | 1 h |
+  | `swizzin-nginx-auth` | wrong passwords for apps behind nginx's login (Sonarr, Radarr, Prowlarr, autobrr…) | 10 in 10 min | 1 h |
+  | `swizzin-scan` | requests for well-known attack paths (`wp-login.php`, `.env`, `.git/`, phpMyAdmin, `cgi-bin/`, phpunit…) that got an error answer | 2 in 1 h | 1 day |
+
+  - `swizzin-panel` reads `/var/log/swizzin-panel/auth.log`, which the panel writes (dashboard
+    sheergood-20).
+  - `swizzin-nginx-auth` uses fail2ban's stock `nginx-http-auth` filter, so a first visit
+    without a password never counts.
+- Your own address can be kept from ever being banned:
+  `/etc/fail2ban/jail.d/swizzin-web.local` with `[DEFAULT]` and `swizzin_ignoreip = <ip>`.
+  Loopback is always kept.
+- The jails are installed by `box update` and the panel install, and removed with the panel.
+  Each jail sets `backend = auto`, because Debian's default `backend = systemd` would never read
+  these log files.
+- **Safety:**
+  - The files are only replaced when they change.
+  - fail2ban must pass its own config test (`fail2ban-client -t`), reload, and then report the
+    new jail.
+  - If any of that fails, the previous files are put back and fail2ban is reloaded as it was.
+- CI:
+  - fail2ban accepts the jails.
+  - Each filter matches only the attack lines in a sample log. It doesn't match normal traffic,
+    `.env` inside a query string, attack paths that were answered with 200, attack paths in a
+    referrer, or first visits without a password.
+  - A second run changes nothing, and remove leaves nothing behind.
+
 ## [sheergood-11] (Nov 28 2026)
 
 ### Added

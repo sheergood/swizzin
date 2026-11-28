@@ -105,6 +105,9 @@ if [[ -f /install/.panel.lock ]]; then
         echo_progress_done
     fi
 
+    # fail2ban web jails (panel logins, app logins, scanners); only reloads fail2ban when they change
+    (panel_f2b_web_setup) || echo_warn "Couldn't add the fail2ban web jails; fail2ban keeps its previous setup"
+
     if [[ ! -f /etc/systemd/system/swizzin-updates.timer ]]; then
         echo_progress_start "Adding app update checks for the panel"
         (panel_updates_setup) || echo_warn "update check setup failed; the panel won't show app updates"

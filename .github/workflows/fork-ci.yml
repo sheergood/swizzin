@@ -38,6 +38,11 @@ jobs:
         run: python3 -m py_compile scripts/panel-f2b-collect scripts/panel-host-collect scripts/panel-updates-check
       - name: update check (all sources faked)
         run: python3 .github/scripts/test-panel-updates.py
+      - name: fail2ban web jails (config accepted, filters match only attacks)
+        run: |
+          sudo apt-get update -q > /dev/null && sudo apt-get install -y -q fail2ban > /dev/null
+          shellcheck -S warning -x .github/scripts/test-fail2ban.sh
+          sudo bash .github/scripts/test-fail2ban.sh
       - name: panel-upgrade refuses anything outside its list
         run: |
           set -u

@@ -170,6 +170,129 @@ function panel_updates_remove() {
     systemctl daemon-reload
 }
 
+# fail2ban jails for the web side (sshd is left exactly as it is). Each one bans on 80/443 only:
+#   swizzin-panel       8 wrong panel passwords in 10 min. The panel logs a failure once per IP +
+#                       login + password per 10 min, so a browser repeating a stale saved password
+#                       counts once; only guessing different passwords adds up.
+#   swizzin-nginx-auth  10 wrong passwords for apps behind nginx's login (Sonarr, Radarr, ...) in
+#                       10 min (fail2ban's stock nginx-http-auth filter: a first visit without a
+#                       password never counts)
+#   swizzin-scan        2 requests in 1 h for well-known attack paths (wp-login.php, .env, .git/,
+#                       phpMyAdmin, ...) that got an error answer
+# Bans start at 1 h (1 day for scanners) and double for repeat offenders, up to 1 day.
+# Loopback is never banned. Add your own addresses in
+# /etc/fail2ban/jail.d/swizzin-web.local:   [DEFAULT]  /  swizzin_ignoreip = 203.0.113.7
+# Nothing is changed unless fail2ban accepts the new configuration; otherwise the previous files
+# come back.
+PANEL_AUTH_LOG=/var/log/swizzin-panel/auth.log
+PANEL_F2B_FILES=(/etc/fail2ban/jail.d/swizzin-web.conf /etc/fail2ban/filter.d/swizzin-panel.conf /etc/fail2ban/filter.d/swizzin-scan.conf)
+# Writes the jail and filters into directory $1 (same layout as /etc/fail2ban); $2 = yes for the
+# nginx jails
+function panel_f2b_web_render() {
+    local out=$1 nginx_jails=$2
+    mkdir -p "$out/jail.d" "$out/filter.d"
+    cat > "$out/filter.d/swizzin-panel.conf" << 'EOFILTER'
+# managed by swizzin (panel_f2b_web_setup): wrong passwords at the swizzin panel.
+# The panel writes only the time and the address, e.g.
+#   2026-11-28T07:44:00+0530 swizzin-panel: login failed from 203.0.113.7
+[Definition]
+failregex = ^\s*swizzin-panel: login failed from <HOST>\s*$
+ignoreregex =
+datepattern = {^LN-BEG}%%Y-%%m-%%dT%%H:%%M:%%S%%z
+EOFILTER
+    cat > "$out/filter.d/swizzin-scan.conf" << 'EOFILTER'
+# managed by swizzin (panel_f2b_web_setup): requests for well-known attack paths that nothing on a
+# swizzin server serves, answered with an error (nginx access log, combined format)
+[Definition]
+_paths = wp-login\.php|xmlrpc\.php|wp-config\.php|wp-admin/|wp-includes/|wp-content/|\.env(?:[.?/]|(?= ))|\.git/|\.svn/|\.aws/|\.ssh/|phpmyadmin|phpMyAdmin|pma/|myadmin/|mysqladmin|boaform|cgi-bin/|vendor/phpunit|HNAP1|actuator/|_ignition/|solr/admin|owa/auth|autodiscover/autodiscover\.xml|setup\.cgi|shell\.php|eval-stdin\.php
+failregex = ^<HOST> \S+ \S+ [^"]*"(?:GET|POST|HEAD|PUT|DELETE|OPTIONS|PROPFIND) (?:https?://[^/" ]+)?/(?:[^" ]*?/)?(?:%(_paths)s)[^" ]* HTTP/[0-9.]+" [45]\d\d\b
+ignoreregex =
+EOFILTER
+    _f2b_jail() { # name filter logpath maxretry findtime bantime
+        printf '\n[%s]\nenabled = true\nfilter = %s\nbackend = auto\nlogpath = %s\nport = http,https\n' "$1" "$2" "$3"
+        printf 'maxretry = %s\nfindtime = %s\nbantime = %s\nbantime.increment = true\nbantime.maxtime = 1d\n' "$4" "$5" "$6"
+        printf 'ignoreip = 127.0.0.1/8 ::1 %%(swizzin_ignoreip)s\n'
+    }
+    {
+        echo "# managed by swizzin (panel_f2b_web_setup); rewritten by box update."
+        echo "# Your own additions go in swizzin-web.local, e.g. addresses that must never be banned:"
+        echo "#   [DEFAULT]"
+        echo "#   swizzin_ignoreip = 203.0.113.7 198.51.100.0/24"
+        echo "[DEFAULT]"
+        echo "swizzin_ignoreip ="
+        _f2b_jail swizzin-panel swizzin-panel "$PANEL_AUTH_LOG" 8 10m 1h
+        if [[ $nginx_jails == yes ]]; then
+            _f2b_jail swizzin-nginx-auth nginx-http-auth /var/log/nginx/error.log 10 10m 1h
+            _f2b_jail swizzin-scan swizzin-scan /var/log/nginx/access.log 2 1h 1d
+        fi
+    } > "$out/jail.d/swizzin-web.conf"
+    unset -f _f2b_jail
+}
+
+function panel_f2b_web_setup() {
+    command -v fail2ban-client > /dev/null 2>&1 || return 0
+    [[ -d /etc/fail2ban/jail.d && -d /etc/fail2ban/filter.d ]] || return 0
+    local stage backup nginx_jails=no f changed=no rc=0
+    # the panel's own failure log: written by the panel (user swizzin), read by fail2ban (root)
+    mkdir -p /var/log/swizzin-panel
+    chown swizzin:swizzin /var/log/swizzin-panel 2> /dev/null || true
+    chmod 0750 /var/log/swizzin-panel
+    if [[ ! -f $PANEL_AUTH_LOG ]]; then
+        touch "$PANEL_AUTH_LOG"
+        chown swizzin:swizzin "$PANEL_AUTH_LOG" 2> /dev/null || true
+        chmod 0640 "$PANEL_AUTH_LOG"
+    fi
+    if [[ -d /var/log/nginx ]]; then
+        for f in /var/log/nginx/error.log /var/log/nginx/access.log; do [[ -f $f ]] || touch "$f"; done
+        nginx_jails=yes
+    fi
+    stage=$(mktemp -d /tmp/swizzin-f2b.XXXXXX) || return 1
+    backup=$(mktemp -d /tmp/swizzin-f2b-prev.XXXXXX) || {
+        rm -rf "$stage"
+        return 1
+    }
+    panel_f2b_web_render "$stage" "$nginx_jails"
+    for f in "${PANEL_F2B_FILES[@]}"; do
+        cmp -s "${stage}${f#/etc/fail2ban}" "$f" || changed=yes
+    done
+    if [[ $changed == no ]]; then
+        rm -rf "$stage" "$backup"
+        return 0
+    fi
+    for f in "${PANEL_F2B_FILES[@]}"; do
+        if [[ -f $f ]]; then cp -p "$f" "${backup}/${f##*/}"; fi
+        install -m 0644 -o root -g root "${stage}${f#/etc/fail2ban}" "$f"
+    done
+    if ! fail2ban-client -t > /tmp/swizzin-f2b-test.log 2>&1; then
+        rc=1
+    elif systemctl is-active -q fail2ban; then
+        if ! fail2ban-client reload >> "${log:-/dev/null}" 2>&1 || ! fail2ban-client status swizzin-panel > /dev/null 2>&1; then
+            rc=1
+        fi
+    fi
+    if ((rc)); then
+        echo_warn "fail2ban didn't accept the new web jails; the previous fail2ban setup was restored (see /tmp/swizzin-f2b-test.log)"
+        for f in "${PANEL_F2B_FILES[@]}"; do
+            if [[ -f ${backup}/${f##*/} ]]; then cp -p "${backup}/${f##*/}" "$f"; else rm -f "$f"; fi
+        done
+        if systemctl is-active -q fail2ban; then fail2ban-client reload >> "${log:-/dev/null}" 2>&1 || true; fi
+    fi
+    rm -rf "$stage" "$backup"
+    return $rc
+}
+
+function panel_f2b_web_remove() {
+    local had=no f
+    for f in "${PANEL_F2B_FILES[@]}"; do
+        if [[ -f $f ]]; then had=yes; fi
+        rm -f "$f"
+    done
+    rm -rf /var/log/swizzin-panel
+    if [[ $had == yes ]] && systemctl is-active -q fail2ban 2> /dev/null; then
+        fail2ban-client reload > /dev/null 2>&1 || true
+    fi
+}
+
 # Port the panel listens on (swizzin.cfg can override the default 8333).
 function panel_port() {
     local p

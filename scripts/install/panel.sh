@@ -93,6 +93,7 @@ echo_progress_start "Setting up SMART collector and traffic stats"
 (panel_host_setup) || echo_warn "host info setup failed; memory module details and Plex now playing will be unavailable"
 (panel_vnstat_setup) || echo_warn "vnstat setup failed; transfer stats will be unavailable"
 (panel_updates_setup) || echo_warn "update check setup failed; the panel won't show app updates"
+(panel_f2b_web_setup) || echo_warn "Couldn't add the fail2ban web jails; fail2ban keeps its previous setup"
 echo_progress_done
 
 echo_progress_start "Installing systemd service"
