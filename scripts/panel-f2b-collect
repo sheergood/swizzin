@@ -3,6 +3,7 @@
 # Runs as root from swizzin-f2b.timer and writes jail status plus recent bans to
 # /var/lib/swizzin/fail2ban.json for the unprivileged panel. Read-only towards fail2ban.
 # Part of the sheergood/swizzin fork. Licensed under GNU GPL v3.
+import grp
 import json
 import os
 import re
@@ -142,10 +143,22 @@ def main():
                 data["db_error"] = str(e)
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=os.path.dirname(OUT), prefix=".f2b.")
-    with os.fdopen(fd, "w") as f:
-        json.dump(data, f)
-    os.chmod(tmp, 0o644)
-    os.replace(tmp, OUT)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f)
+        # attackers' and your own addresses: readable by the panel only, not by every user on the box
+        try:
+            os.chown(tmp, 0, grp.getgrnam("swizzin").gr_gid)
+            os.chmod(tmp, 0o640)
+        except (KeyError, OSError):
+            os.chmod(tmp, 0o644)   # no panel group yet: as before
+        os.replace(tmp, OUT)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 if __name__ == "__main__":

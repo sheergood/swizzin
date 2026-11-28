@@ -1,10 +1,16 @@
 #!/bin/bash
 # Runs one app upgrade for the panel, as root, inside its own systemd job (started by panel-upgrade;
 # not callable through sudo). It runs that app's own swizzin upgrade script directly (not
-# `box upgrade`, which would first run a full `box update`), or for Plex an apt upgrade of the
-# plexmediaserver package alone. Progress goes to /var/lib/swizzin/upgrades/<app>.json and the
-# output to <app>.log (root:swizzin 0640, last 400 lines kept). The previous program file is kept
-# until the app's services are confirmed running again, and put back if they aren't.
+# `box upgrade`, which would first run a full `box update`), or for apt apps an upgrade of that
+# app's packages alone. Progress goes to /var/lib/swizzin/upgrades/<app>.json and the output to
+# <app>.log (root:swizzin 0640, last 400 lines kept).
+#
+# Apps with a single program file (autobrr, Filebrowser, Navidrome, Netronome) are stopped first, so
+# their program and their database can be copied in a consistent state. If they don't come back up
+# afterwards, both are put back together: a new version may already have changed the database, and
+# the old program must get the old database. Package apps (Plex, Jellyfin, Ombi, Emby) can't be
+# rolled back, but the job checks the package really changed instead of reporting a quiet no-op as
+# a success.
 set -uo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin
 export DEBIAN_FRONTEND=noninteractive TERM=xterm HOME=/root
@@ -41,11 +47,28 @@ finish() { # state message
     say "$2"
     trim_log
     write_state "$1" "$2"
-    /usr/bin/python3 /etc/swizzin/scripts/panel-updates-check > /dev/null 2>&1 || true # cards show the new version
+    # cards show the new version; through the service so it never runs twice at once
+    if [[ -f /etc/systemd/system/swizzin-updates.service ]]; then
+        systemctl start swizzin-updates.service > /dev/null 2>&1 || true
+    else
+        /usr/bin/python3 /etc/swizzin/scripts/panel-updates-check > /dev/null 2>&1 || true
+    fi
     exit 0
 }
 # if anything kills this job part-way (timeout, reboot handling), never leave the card stuck on "running"
-trap '[[ -n $finished_ok ]] || { say "The upgrade was interrupted"; trim_log; write_state failed "The upgrade was interrupted; see the log"; }' EXIT
+# (and never leave an app stopped: single-program apps are stopped while they're copied)
+on_exit() {
+    [[ -n $finished_ok ]] && return
+    say "The upgrade was interrupted"
+    if ((${#bins[@]})); then
+        for u in "${units[@]}"; do systemctl start "$u" > /dev/null 2>&1 || true; done
+    fi
+    trim_log
+    write_state failed "The upgrade was interrupted; see the log"
+}
+bins=()
+units=()
+trap on_exit EXIT
 
 : > "$log"
 chgrp swizzin "$log" 2> /dev/null || true
@@ -54,8 +77,10 @@ chmod 0640 "$log"
 master=$(cut -d: -f1 < /root/.master.info 2> /dev/null || true)
 bins=()
 units=()
+data=()     # files copied with the program and restored with it (databases, configs)
 apt_list=""
 apt_pkgs=()
+pkg=""      # package whose version must change for the upgrade to count
 case "$app" in
     autobrr)
         bins=(/usr/bin/autobrr /usr/bin/autobrrctl)
@@ -63,36 +88,45 @@ case "$app" in
         mapfile -t users < <(find /root/ -maxdepth 1 -name '*.info' -exec cut -d: -f1 {} \; 2> /dev/null | sort -u)
         for u in "${users[@]}"; do
             if [[ -n $u ]] && systemctl is-active -q "autobrr@${u}" 2> /dev/null; then units+=("autobrr@${u}"); fi
+            [[ -n $u ]] && data+=("/home/${u}/.config/autobrr/autobrr.db" "/home/${u}/.config/autobrr/config.toml")
         done
         ;;
     filebrowser)
-        [[ -n $master ]] && bins=("/home/${master}/bin/filebrowser")
+        [[ -n $master ]] && bins=("/home/${master}/bin/filebrowser") data=("/home/${master}/.config/Filebrowser/filebrowser.db")
         if systemctl is-active -q filebrowser 2> /dev/null; then units+=(filebrowser); fi
         ;;
     plex)
-        apt_list=plexmediaserver.list apt_pkgs=(plexmediaserver)
+        apt_list=plexmediaserver.list apt_pkgs=(plexmediaserver) pkg=plexmediaserver
         if systemctl is-active -q plexmediaserver 2> /dev/null; then units+=(plexmediaserver); fi
         ;;
     jellyfin)
-        apt_list=jellyfin.list apt_pkgs=(jellyfin jellyfin-server jellyfin-web)
+        apt_list=jellyfin.list apt_pkgs=(jellyfin jellyfin-server jellyfin-web) pkg=jellyfin-server
         if systemctl is-active -q jellyfin 2> /dev/null; then units+=(jellyfin); fi
         ;;
     ombi)
-        apt_list=ombi.list apt_pkgs=(ombi)
+        apt_list=ombi.list apt_pkgs=(ombi) pkg=ombi
         if systemctl is-active -q ombi 2> /dev/null; then units+=(ombi); fi
         ;;
     navidrome)
         bins=(/opt/navidrome/navidrome)
         if systemctl is-active -q navidrome 2> /dev/null; then units+=(navidrome); fi
+        # its database lives in DataFolder (navidrome.toml), else the service's working directory
+        if [[ -n $master ]]; then
+            nd=$(grep -oP '^\s*DataFolder\s*=\s*"\K[^"]+' "/home/${master}/.config/navidrome/navidrome.toml" 2> /dev/null | head -n1)
+            [[ -n $nd ]] || nd=$(grep -oP '^WorkingDirectory=\K\S+' /etc/systemd/system/navidrome.service 2> /dev/null | head -n1)
+            [[ -n $nd ]] && data=("${nd%/}/navidrome.db" "/home/${master}/.config/navidrome/navidrome.toml")
+        fi
         ;;
     netronome)
         bins=(/usr/bin/netronome)
         mapfile -t users < <(find /root/ -maxdepth 1 -name '*.info' -exec cut -d: -f1 {} \; 2> /dev/null | sort -u)
         for u in "${users[@]}"; do
             if [[ -n $u ]] && systemctl is-active -q "netronome@${u}" 2> /dev/null; then units+=("netronome@${u}"); fi
+            [[ -n $u ]] && data+=("/home/${u}/.config/netronome/netronome.db" "/home/${u}/.config/netronome/config.toml")
         done
         ;;
     emby)
+        pkg=emby-server
         if systemctl is-active -q emby-server 2> /dev/null; then units+=(emby-server); fi
         ;;
     lounge)
@@ -101,17 +135,50 @@ case "$app" in
     *) ;; # fbquantum: its own upgrade script backs up, health-checks and rolls back
 esac
 
+pkg_version() { dpkg-query -W -f='${Version}' "$1" 2> /dev/null || true; }
+prev="${dir}/${app}.prev"   # copies of the program's data (root only)
+
 write_state running "Upgrading ${app}"
 say "Upgrading ${app} ($(date -u '+%Y-%m-%d %H:%M UTC'))"
-for b in "${bins[@]}"; do
-    if [[ -f $b ]]; then cp -p "$b" "${b}.panel-prev"; fi
-done
+pkg_before=""
+[[ -n $pkg ]] && pkg_before=$(pkg_version "$pkg")
+
+# single-program apps: stop, then copy program + data while nothing writes to them. Their upgrade
+# scripts only try-restart, so the services stay stopped until they're started below.
+if ((${#bins[@]})); then
+    for u in "${units[@]}"; do systemctl stop "$u" >> "$log" 2>&1 || true; done
+    rm -rf "$prev"
+    install -d -m 0700 "$prev"
+    for b in "${bins[@]}"; do
+        if [[ -f $b ]]; then cp -p "$b" "${b}.panel-prev"; fi
+    done
+    need=0
+    for f in "${data[@]}"; do
+        for g in "$f" "$f-wal" "$f-shm"; do
+            [[ -f $g ]] && need=$((need + $(stat -c %s "$g")))
+        done
+    done
+    free=$(($(df --output=avail -B1 "$dir" 2> /dev/null | tail -n1 | tr -d ' ') + 0))
+    if ((need > 0 && free < need * 2 + 104857600)); then
+        say "Not enough free space to copy the app's data (needs $((need / 1048576)) MB); only the program is kept"
+        data=()
+    fi
+    for f in "${data[@]}"; do
+        for g in "$f" "$f-wal" "$f-shm"; do
+            if [[ -f $g ]]; then cp -p --parents "$g" "$prev/"; fi
+        done
+    done
+fi
 
 if [[ -n $apt_list ]]; then
     # only this app's packages, from its own repository; packages that aren't installed are skipped
     lst=/etc/apt/sources.list.d/$apt_list
     if [[ -f $lst ]]; then
-        apt-get update -q -o Dir::Etc::sourcelist="$lst" -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 >> "$log" 2>&1
+        for try in 1 2 3; do   # another apt run may hold the lists lock for a moment
+            apt-get update -q -o Dir::Etc::sourcelist="$lst" -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 >> "$log" 2>&1 && break
+            say "apt-get update failed (try ${try}); waiting"
+            sleep 15
+        done
     fi
     apt-get install -y -q --only-upgrade -o DPkg::Lock::Timeout=300 -o Dpkg::Options::=--force-confold \
         "${apt_pkgs[@]}" >> "$log" 2>&1 < /dev/null
@@ -122,6 +189,17 @@ else
     rc=$?
 fi
 say "Upgrade step finished (exit ${rc})"
+if ((${#bins[@]})); then
+    for u in "${units[@]}"; do systemctl start "$u" >> "$log" 2>&1 || true; done
+fi
+# package apps: a step that "worked" but left the same version installed isn't an upgrade
+if [[ $rc -eq 0 && -n $pkg ]]; then
+    pkg_after=$(pkg_version "$pkg")
+    if [[ -n $pkg_before && $pkg_after == "$pkg_before" ]]; then
+        say "${pkg} is still ${pkg_before}: nothing newer was installed"
+        rc=100
+    fi
+fi
 
 # give services a moment, then make sure everything that was running before is running again
 healthy=true
@@ -137,19 +215,35 @@ fi
 
 if [[ $rc -eq 0 && $healthy == true ]]; then
     for b in "${bins[@]}"; do rm -f "${b}.panel-prev"; done
+    rm -rf "$prev"
     finish "done" "${app} upgraded"
 fi
 
 restored=false
-for b in "${bins[@]}"; do
-    if [[ -f ${b}.panel-prev ]]; then
-        mv -f "${b}.panel-prev" "$b"
-        restored=true
+if ((${#bins[@]})); then
+    for u in "${units[@]}"; do systemctl stop "$u" >> "$log" 2>&1 || true; done
+    for b in "${bins[@]}"; do
+        if [[ -f ${b}.panel-prev ]]; then
+            mv -f "${b}.panel-prev" "$b"
+            restored=true
+        fi
+    done
+    if [[ $restored == true && -d $prev ]]; then
+        # the old program gets its old data back (a newer version may have migrated it)
+        for f in "${data[@]}"; do
+            rm -f "$f-wal" "$f-shm"
+            for g in "$f" "$f-wal" "$f-shm"; do
+                if [[ -f ${prev}${g} ]]; then cp -p "${prev}${g}" "$g"; fi
+            done
+        done
     fi
-done
+    for u in "${units[@]}"; do systemctl start "$u" >> "$log" 2>&1 || true; done
+fi
 if [[ $restored == true ]]; then
-    say "Restoring the previous version"
-    for u in "${units[@]}"; do systemctl restart "$u" >> "$log" 2>&1 || true; done
+    say "Restored the previous version and its data"
     finish failed "The upgrade failed and the previous version was restored"
+fi
+if [[ $rc -eq 100 ]]; then
+    finish failed "Nothing newer was installed; see the log"
 fi
 finish failed "The upgrade failed (exit ${rc}); see the log"

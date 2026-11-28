@@ -32,6 +32,12 @@ if [[ ! -f /install/.${app}.lock ]]; then
     echo "panel-upgrade: $app isn't installed" >&2
     exit 3
 fi
+# one caller at a time from here to the job being queued, so two quick clicks can't start two upgrades
+exec 9> /run/swizzin-panel-upgrade.lock
+if ! flock -w 10 9; then
+    echo "panel-upgrade: another upgrade is starting" >&2
+    exit 4
+fi
 running=$(systemctl list-units --no-legend --plain 'swizzin-upgrade-*' 2> /dev/null || true)
 if [[ $running == *swizzin-upgrade-* ]]; then
     echo "panel-upgrade: another upgrade is running" >&2

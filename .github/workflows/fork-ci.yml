@@ -54,6 +54,19 @@ jobs:
         run: |
           shellcheck -S warning -x sources/functions/bare_ip scripts/update/nginx-bare-ip.sh .github/scripts/test-bare-ip.sh
           sudo bash .github/scripts/test-bare-ip.sh
+      - name: panel-systemctl refuses non-services and the units a remote server needs
+        run: |
+          set -u
+          for u in reboot.target poweroff.target halt.target rescue.target ssh.socket a.b '../x' '-x' ''; do
+            rc=0; sudo scripts/panel-systemctl start "$u" > /dev/null 2>&1 || rc=$?
+            [[ $rc -eq 2 ]] || { echo "::error::panel-systemctl start '$u' exited $rc, expected 2"; exit 1; }
+          done
+          for u in ssh sshd.service rescue emergency.service poweroff reboot user@0 systemd-journald fail2ban nftables swizzin-upgrade-autobrr; do
+            rc=0; sudo scripts/panel-systemctl stop "$u" > /dev/null 2>&1 || rc=$?
+            [[ $rc -eq 3 ]] || { echo "::error::panel-systemctl stop '$u' exited $rc, expected 3"; exit 1; }
+          done
+          rc=0; sudo scripts/panel-systemctl mask nginx > /dev/null 2>&1 || rc=$?
+          [[ $rc -eq 2 ]] || { echo "::error::action mask allowed"; exit 1; }
       - name: panel-upgrade refuses anything outside its list
         run: |
           set -u
@@ -72,6 +85,10 @@ jobs:
             [ -e "$f" ] || { echo "::error::missing $f"; missing=1; }
           done
           exit $missing
+      - name: panel-upgrade-run end to end (good upgrade, broken upgrade restores program + data, apt no-op) - keep last
+        run: |
+          shellcheck -S warning -x .github/scripts/test-upgrade-run.sh
+          sudo bash .github/scripts/test-upgrade-run.sh
 
   fbquantum:
     # runs the newest stable FileBrowser Quantum with the config swizzin writes and checks single

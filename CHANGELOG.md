@@ -1,5 +1,45 @@
 # Changelog
 
+## [sheergood-16] (Nov 28 2026)
+
+Review of everything the panel can do as root, with fixes.
+
+### Security
+- **`panel-systemctl` controls services only.** It refuses targets, sockets, mounts and timers,
+  so a compromised panel can no longer `start reboot.target` or `poweroff.target` and take a
+  remote server down. It also refuses the units a remote server needs to stay reachable and
+  intact: rescue/emergency/halt/poweroff/reboot/kexec services, user managers, network, time and
+  RAID services, rsyslog/auditd/apparmor, and swizzin's own collector and upgrade jobs. The app
+  units the panel uses are unaffected.
+- The fail2ban snapshot (`/var/lib/swizzin/fail2ban.json`, with banned and failing addresses) is
+  readable by the panel only (root:swizzin 0640), no longer by every user on the server.
+
+### Fixed
+- **Rolling back an app after a failed upgrade could leave the old program with a database the
+  new version had already changed.**
+  - autobrr, Filebrowser, Navidrome and Netronome are now stopped first, so their program and
+    their database (with its `-wal`/`-shm` files) and config are copied in a consistent state.
+  - If the app doesn't come back up, both go back together.
+  - The data copy is skipped, with a note in the log, when the disk is short of space.
+  - An interrupted job starts the apps it stopped again.
+- **A package upgrade that installed nothing was reported as done.** This could happen if apt
+  couldn't refresh the app's repository, or if Emby's script found nothing newer. Plex,
+  Jellyfin, Ombi and Emby now count as upgraded only when the package version actually changed;
+  otherwise the card says "Nothing newer was installed".
+  - The app's repository refresh is retried while another apt run holds the lock.
+- **Two quick clicks could start two upgrades at once.** `panel-upgrade` now holds a lock from
+  its checks until the job is queued.
+- The check after an upgrade runs through `swizzin-updates.service`, so it never runs twice at
+  the same time as the timer or Check now.
+
+### Checked
+- CI runs `panel-upgrade-run` end to end with faked services, packages and upgrade script:
+  - a good upgrade keeps the new program and data;
+  - a broken upgrade puts back the old program and its old database;
+  - an apt no-op is reported as failed;
+  - the app is never left stopped.
+- CI checks that `panel-systemctl` refuses targets, sockets, bad names and the protected units.
+
 ## [sheergood-15] (Nov 28 2026)
 
 ### Fixed

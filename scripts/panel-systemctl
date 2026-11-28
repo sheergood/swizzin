@@ -25,9 +25,20 @@ if [[ ! $unit =~ ^[A-Za-z0-9][A-Za-z0-9@._-]{0,100}$ ]]; then
     echo "panel-systemctl: '$unit' is not a unit name" >&2
     exit 2
 fi
+# services only: no targets, sockets, mounts or timers (starting reboot.target or poweroff.target
+# would take a remote server down)
 base=${unit%.service}
+if [[ $base == *.* ]]; then
+    echo "panel-systemctl: only services can be controlled from the panel" >&2
+    exit 2
+fi
 case "$base" in
-    ssh | sshd | dbus | dbus-* | systemd-* | getty@* | serial-getty@* | networking | NetworkManager | cron | sudo | polkit | ufw | nftables | iptables | fail2ban)
+    ssh | sshd | dbus | dbus-* | systemd-* | getty@* | serial-getty@* | console-getty | container-getty@* | \
+        networking | NetworkManager* | ifup@* | ifupdown* | networkd-dispatcher | resolvconf | wpa_supplicant* | netplan* | \
+        cron | sudo | polkit | ufw | nftables | iptables | netfilter-persistent | fail2ban | \
+        rescue | emergency | halt | poweroff | reboot | kexec | ctrl-alt-del | user@* | user-runtime-dir@* | \
+        rsyslog | auditd | apparmor | chrony | chronyd | ntp | ntpsec | mdmonitor | mdadm* | lvm2-* | multipathd | \
+        swizzin-upgrade-* | swizzin-f2b | swizzin-host | swizzin-smart | swizzin-updates)
         echo "panel-systemctl: $unit is managed outside the panel" >&2
         exit 3
         ;;
