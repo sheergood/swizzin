@@ -1,5 +1,47 @@
 # Changelog
 
+## [sheergood-22] (Nov 28 2026)
+
+### Added (with the panel's sheergood-26)
+- **Update history.** Every update, rollback and hold made from the panel is recorded, and so is
+  every version change the 6-hourly check sees that the panel didn't make (by `box`, apt or the app
+  itself). Each entry has who did it, how long it took, the reason it failed, and its log. The last
+  200 entries are kept in `/var/lib/swizzin/upgrades/history.json` (root writes it, the panel reads it).
+- **Roll back.** Before each update from the panel, a copy of the app's program and its data is
+  taken. After a good update that copy is kept until the next one, and Roll back puts both back.
+  - Rollback is available for autobrr, Filebrowser, FileBrowser Quantum, Navidrome, Netronome, Plex,
+    Jellyfin, Sonarr, Radarr, Prowlarr and Lidarr. Plex and Jellyfin get their package and databases back.
+  - A rollback first copies the current version. If the app doesn't come back up, the current version
+    is put back.
+  - The app is held afterwards, so it doesn't update straight back.
+  - Rollback is refused if the app changed since that update, for example if it was updated outside
+    the panel.
+- **Hold / Release.** A held app isn't offered updates and Update all skips it. Plex, Jellyfin, Ombi
+  and Emby are also `apt-mark hold`, so `apt upgrade` leaves them alone too.
+- Sonarr, Radarr, Prowlarr and Lidarr updates from the panel now run as a root job like the other
+  apps. That's what lets a copy be taken first and survive a panel restart. The app's own updater
+  still installs the update.
+- `panel-upgrade` gained `features`, `rollback`, `hold`, `release`, `--major` and `--by`, and still
+  checks every argument. A panel older than this keeps working exactly as before.
+
+### Security
+- The upgrade job used to copy files in users' home folders as root (`cp -p`). On a shared box, a
+  user could plant a symlink there to read root-only files or overwrite system files during a
+  restore. Files in folders a user owns are now read and written by a process running as that
+  user, which opens files without following symlinks. A file whose folder changed owner since the
+  copy isn't written at all.
+
+### Tested
+- `test-upgrade-lib.py` (as root): copy, keep, check, restore and undo, a live SQLite copy, the
+  symlink and ownership tricks, history limits and cleaning, holds, and Servarr updates against a
+  fake API (installs, a major version needs confirming, the updater's failure reason comes through).
+- `test-upgrade-run.sh`: a good upgrade, a failed rollback undone, a rollback, a held app refused,
+  a broken upgrade restored, and an apt no-op.
+- os-check on real Debian 12 and 13 installs:
+  - autobrr: upgrade, then roll back;
+  - Jellyfin: its packages and databases copied and put back;
+  - Prowlarr: an older version updated by its own updater from the panel, then rolled back to it.
+
 ## [sheergood-21] (Nov 28 2026)
 
 ### Added

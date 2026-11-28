@@ -19,6 +19,7 @@ Licensed under GPL-3.0 like upstream; every change is listed in `CHANGELOG.md` u
 | Traffic stats | Panel table | Today / week / 7 days / month / all time + 7-day chart from vnstat |
 | Security | — | fail2ban jails and recent bans (`swizzin-f2b.timer` → `/var/lib/swizzin/fail2ban.json`) |
 | Updates | — | non-fatal panel extras, panel backup + health check + auto-rollback, CI |
+| App updates in the panel | — | Update / Update all, update history, Roll back one version (program + data), Hold / Release |
 
 ## Rolling out to production safely
 

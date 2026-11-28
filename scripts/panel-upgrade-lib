@@ -493,6 +493,8 @@ def _free(path):
 
 
 def _size(item):
+    if item["type"] == "debs":
+        return 600 * 1024 * 1024 if item["pkgs"] and item["pkgs"][0] == "plexmediaserver" else 300 * 1024 * 1024
     path = p(item["path"])
     try:
         if item["type"] == "dir":
@@ -504,8 +506,6 @@ def _size(item):
                     except OSError:
                         pass
             return total
-        if item["type"] == "debs":
-            return 600 * 1024 * 1024 if item["pkgs"] and item["pkgs"][0] == "plexmediaserver" else 300 * 1024 * 1024
         return os.lstat(path).st_size
     except OSError:
         return 0
@@ -585,7 +585,7 @@ def snap_save(app, slot):
     out_items = []
     for n, item in enumerate(s["items"]):
         it = dict(item, state="failed")
-        path = p(item["path"])
+        path = p(item["path"]) if item.get("path") else None
         name = "{:03d}".format(n)
         if item["role"] == "data" and not data_ok:
             it["state"] = "skipped"

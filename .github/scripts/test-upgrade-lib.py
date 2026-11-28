@@ -244,6 +244,23 @@ class Servarr(Base):
 
 
 class Packages(Base):
+    def test_package_app_copy_runs_through(self):
+        # Jellyfin: package copies (not installed here, so the copy is incomplete) + databases as their owner
+        data = self.F("/var/lib/jellyfin/data")
+        os.makedirs(data)
+        for d in (self.F("/var"), self.F("/var/lib")):
+            os.chmod(d, 0o755)
+        put(data + "/jellyfin.db", "jf-db", self.u1, 0o600)
+        own_tree(self.F("/var/lib/jellyfin"), self.u1)
+        complete, reason = self.lib.snap_save("jellyfin", "new")
+        self.assertFalse(complete)
+        self.assertIn("jellyfin", reason)
+        meta = self.lib.snap_meta("jellyfin", "new")
+        db = [i for i in meta["items"] if i.get("path", "").endswith("jellyfin.db")][0]
+        self.assertEqual((db["state"], db["uid"]), ("present", self.u1.pw_uid))
+        self.lib.snap_keep("jellyfin", "1", "2")
+        self.assertNotIn("jellyfin", self.lib.read_json(os.path.join(self.base, "rollback.json"), {}))
+
     def test_package_fingerprint_needs_no_path(self):
         fp = self.lib.fingerprint({"type": "debs", "pkgs": ["swz-no-such-package"], "role": "prog"})
         self.assertEqual(fp, "swz-no-such-package=-")
