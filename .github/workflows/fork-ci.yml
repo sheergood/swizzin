@@ -86,6 +86,10 @@ jobs:
         run: |
           shellcheck -S warning -x .github/scripts/test-fpm-pin.sh
           bash .github/scripts/test-fpm-pin.sh
+      - name: apt update waits for another apt instead of failing
+        run: |
+          shellcheck -S warning .github/scripts/test-apt-wait.sh
+          bash .github/scripts/test-apt-wait.sh
       - name: no dangling helper references
         run: |
           missing=0

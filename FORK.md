@@ -13,6 +13,7 @@ Licensed under GPL-3.0 like upstream; every change is listed in `CHANGELOG.md` u
 | Installer source | `swizzin/swizzin` | `sheergood/swizzin` (`SWIZ_REPO` overrides) |
 | Panel source | `liaralabs/swizzin_dashboard` | `sheergood/swizzin_dashboard` (`PANEL_REPO`, `PANEL_BRANCH`) |
 | Panel UI | Bootstrap dashboard | Liquid-glass dashboard with CPU/GPU/SMART/wear/network detail; old UI at `/classic` |
+| Debian releases | 11, 12 | 11, 12, **13 (Trixie)** — 12 and 13 tested with real installs (`os-check`) |
 | Apps | all | all — unchanged from upstream |
 | Drive health | — | `swizzin-smart.timer` → `/var/lib/swizzin/smart/*.json`; SSD wear level, HDD SMART table |
 | Traffic stats | Panel table | Today / week / 7 days / month / all time + 7-day chart from vnstat |
@@ -64,15 +65,15 @@ upstream commit ──(7 days old?)──► merge into upstream-sync ──► 
 3. **Full CI on the merged result**, plus a **real install** (`os-check`). CI runs the same tests
    as every push: shellcheck, the panel and fail2ban tests, nginx config tests and the
    FileBrowser Quantum end-to-end test. `os-check` does a fresh swizzin install, adds your apps,
-   runs `box update`, and checks every service runs and answers through nginx, in a Debian 12
-   container. If anything fails, nothing changes and an issue says why. `os-check` also runs
+   runs `box update`, and checks every service runs and answers through nginx, in Debian 12 and
+   Debian 13 containers. Both must pass. If anything fails, nothing changes and an issue says why. `os-check` also runs
    every Sunday on `master`, so a change outside the fork (like Plex moving its apt repository)
    shows up as a failed run, and GitHub emails you about failed scheduled runs.
 4. **Approval for anything risky.** The update is merged and tested, but waits for you, when it:
    - changes code `box update` runs on every server (`REVIEW_PATHS`: `scripts/box`, `setup.sh`,
      `sources/`, `scripts/update/`);
-   - changes an app you run (`PROTECTED_APPS`: autobrr, Filebrowser, FileBrowser Quantum, Plex,
-     Prowlarr, qBittorrent, Radarr, Sonarr, panel, nginx, Let's Encrypt);
+   - changes an app you run (`PROTECTED_APPS`: autobrr, Deluge, Filebrowser, FileBrowser Quantum,
+     Jellyfin, Plex, Prowlarr, qBittorrent, Radarr, Sonarr, panel, nginx, Let's Encrypt);
    - changes a file this fork has changed too, even when git merged it cleanly. A clean text
      merge can still break what the fork's change relies on;
    - removes an app (this fork keeps every app unless you decide otherwise);
