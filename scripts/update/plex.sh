@@ -1,12 +1,8 @@
 #!/bin/bash
 
-if [[ -f /etc/apt/sources.list.d/plexmediaserver.list ]]; then
-    if grep -q "/deb/" /etc/apt/sources.list.d/plexmediaserver.list; then
-        echo_info "Updating plex apt repo endpoint"
-        echo "deb https://downloads.plex.tv/repo/deb public main" > /etc/apt/sources.list.d/plexmediaserver.list
-        apt_update
-    fi
-fi
+# (sheergood fork) The old "/deb/" endpoint rewrite is gone: it turned Plex's new repository
+# (https://repo.plex.tv/deb/) back into the retired one. Repository moves are done by
+# scripts/update/06-plex-repo.sh, before box update first runs apt.
 
 # removing lockfile for the upgrade script so that it can be re-run as many times as people want
 if [ -f "/install/.updateplex.lock" ]; then

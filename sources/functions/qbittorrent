@@ -96,7 +96,8 @@ function qbittorrent_version_info() {
     if [[ ${QBITTORRENT_VERSION} == "latest" ]]; then
         case $(_os_codename) in
             *)
-                QBITTORRENT_VERSION=$(git ls-remote -t --refs https://github.com/qbittorrent/qBittorrent.git | awk '{sub("refs/tags/release-", ""); print $2 }' | grep -v -e "beta" -e "rc" | sort -Vr | head -n1)
+                # newest release this installer can build (4.1.x to 5.1.x); newer ones are refused below
+                QBITTORRENT_VERSION=$(git ls-remote -t --refs https://github.com/qbittorrent/qBittorrent.git | awk '{sub("refs/tags/release-", ""); print $2 }' | grep -v -e "beta" -e "rc" | grep -E '^(4\.[1-9]|5\.[01])\.' | sort -Vr | head -n1)
                 #latestv44=$(echo "$releases" | grep -m1 -oP '4\.4\.\d?.?\d')
                 ;;
         esac

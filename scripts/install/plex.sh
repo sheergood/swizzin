@@ -28,9 +28,14 @@ read 'claim'
 #latest=$(echo ${releases} | grep -m1 -ioe 'https://[^\"]*')
 
 echo_progress_start "Installing plex keys and sources ... "
-apt_install apt-transport-https
-curl -s https://downloads.plex.tv/plex-keys/PlexSign.key | gpg --dearmor > /usr/share/keyrings/plex-archive-keyring.gpg 2>> "${log}"
-echo "deb [signed-by=/usr/share/keyrings/plex-archive-keyring.gpg] https://downloads.plex.tv/repo/deb public main" > /etc/apt/sources.list.d/plexmediaserver.list
+# Plex's current repository and key (the old downloads.plex.tv/repo/deb answers 404)
+#shellcheck source=sources/functions/plex_repo
+. /etc/swizzin/sources/functions/plex_repo
+plex_repo_migrate > /dev/null 2>&1 || true
+if ! plex_repo_install; then
+    echo_error "Couldn't download Plex's signing key (${PLEX_KEY_URL})"
+    exit 1
+fi
 echo
 
 apt_update

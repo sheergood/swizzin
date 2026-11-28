@@ -1,0 +1,61 @@
+#!/bin/bash
+# Plex's apt repository moved (Plex Media Server 1.43, Feb 2026): the old one,
+# https://downloads.plex.tv/repo/deb, now answers 404, which makes every `apt update`, and so
+# `box update` and every app install, fail. The new one is https://repo.plex.tv/deb/ signed with
+# PlexSign.v2.key (https://support.plex.tv/articles/235974187).
+# Part of the sheergood/swizzin fork. Licensed under GNU GPL v3.
+
+PLEX_KEY_URL=https://downloads.plex.tv/plex-keys/PlexSign.v2.key
+PLEX_KEYRING=/etc/apt/keyrings/plexmediaserver.v2.gpg
+PLEX_LIST=/etc/apt/sources.list.d/plexmediaserver.list
+PLEX_REPO_LINE="deb [signed-by=${PLEX_KEYRING}] https://repo.plex.tv/deb/ public main"
+
+# Downloads and installs Plex's signing key. 0 when the keyring is in place.
+plex_repo_key() {
+    local tmp
+    tmp=$(mktemp -d) || return 1
+    if curl -fsL --max-time 30 "$PLEX_KEY_URL" -o "$tmp/key" 2> /dev/null &&
+        gpg --batch --yes --dearmor -o "$tmp/key.gpg" "$tmp/key" 2> /dev/null &&
+        gpg --batch --show-keys "$tmp/key.gpg" > /dev/null 2>&1; then
+        install -d -m 0755 "$(dirname "$PLEX_KEYRING")"
+        install -m 0644 "$tmp/key.gpg" "$PLEX_KEYRING"
+        rm -rf "$tmp"
+        return 0
+    fi
+    rm -rf "$tmp"
+    return 1
+}
+
+# Writes the new repository (and key). Used by the installer.
+plex_repo_install() {
+    plex_repo_key || return 1
+    echo "$PLEX_REPO_LINE" > "$PLEX_LIST"
+}
+
+# Moves a server off the old repository. Old entries are always taken out (they only make apt
+# fail); the new one is added if nothing points at it yet and the key could be fetched.
+# Backups of removed files go to /root/swizzin/backups/plex-apt/.
+plex_repo_migrate() {
+    local f changed=no newline_present=no
+    shopt -s nullglob
+    for f in /etc/apt/sources.list.d/plex*.list /etc/apt/sources.list.d/plex*.sources; do
+        if grep -qE '^[[:space:]]*[^#[:space:]].*downloads\.plex\.tv/repo/deb' "$f"; then
+            mkdir -p /root/swizzin/backups/plex-apt
+            cp -p "$f" "/root/swizzin/backups/plex-apt/$(basename "$f").$(date +%Y%m%d%H%M%S)"
+            rm -f "$f"
+            changed=yes
+        fi
+    done
+    for f in /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
+        grep -qE '^[[:space:]]*[^#[:space:]].*repo\.plex\.tv/deb' "$f" && newline_present=yes
+    done
+    shopt -u nullglob
+    if [[ $newline_present == no && -f /install/.plex.lock ]]; then
+        if plex_repo_install; then
+            changed=yes
+        else
+            echo_warn "Couldn't fetch Plex's new signing key; Plex updates through apt resume after the next box update"
+        fi
+    fi
+    [[ $changed == yes ]]
+}

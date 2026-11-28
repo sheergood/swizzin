@@ -2,7 +2,11 @@
 # Ensures that dependencies are installed and corrects them if that is not the case.
 
 if ! which add-apt-repository > /dev/null; then
-    apt_install software-properties-common # Ubuntu may require universe/mutliverse enabled for certain packages so we must ensure repos are enabled before deps are attempted to installed
+    # (sheergood fork) Debian 13 no longer has this package; it's only needed where repos are
+    # enabled with add-apt-repository (Ubuntu, and Debian without debian.sources)
+    if apt-cache show software-properties-common > /dev/null 2>&1; then
+        apt_install software-properties-common # Ubuntu may require universe/mutliverse enabled for certain packages so we must ensure repos are enabled before deps are attempted to installed
+    fi
 fi
 
 if [[ $(_os_distro) == "ubuntu" ]]; then
@@ -84,6 +88,12 @@ fi
 
 #space-separated list of required GLOBAL SWIZZIN dependencies (NOT application specific ones)
 dependencies="whiptail git sudo curl wget lsof rsyslog fail2ban apache2-utils vnstat tcl tcl-dev build-essential dirmngr apt-transport-https bc uuid-runtime jq net-tools gnupg2 cracklib-runtime unzip ccze cron"
+# (sheergood fork) packages a newer release dropped (apt-transport-https is part of apt itself now)
+for optional in apt-transport-https; do
+    if ! apt-cache show "$optional" > /dev/null 2>&1; then
+        dependencies=${dependencies/ $optional / }
+    fi
+done
 
 apt_install "${dependencies[@]}"
 

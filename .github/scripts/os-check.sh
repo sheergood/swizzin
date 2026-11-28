@@ -83,11 +83,24 @@ for app in ${APPS:-autobrr filebrowser prowlarr radarr sonarr qbittorrent plex};
 done
 
 # --- 3. box update (no git pull here: this checkout is the code under test)
+# A server set up before Plex retired its old apt repository still points at it, and then every
+# apt update fails. Put that old entry back to check box update moves it (as on real servers).
+if [[ -f /install/.plex.lock ]]; then
+    rm -f /etc/apt/sources.list.d/plex*.list
+    echo "deb [signed-by=/usr/share/keyrings/plex-archive-keyring.gpg] https://downloads.plex.tv/repo/deb public main" > /etc/apt/sources.list.d/plexmediaserver.list
+fi
 step "box update" bash "$box" update
 rc=$?
 secs=$(cat "/root/os-check-logs/box_update.log.secs")
 if [[ $rc -eq 0 ]]; then
     row "box update" "✅" "$secs" ""
+    if [[ -f /install/.plex.lock ]]; then
+        if grep -rqs 'downloads.plex.tv/repo/deb' /etc/apt/sources.list.d/ || ! grep -rqs 'repo.plex.tv/deb' /etc/apt/sources.list.d/; then
+            row "box update moved Plex to its new apt repository" "❌" "" "$(cat /etc/apt/sources.list.d/plex* 2> /dev/null | tr '\n' ' ')"
+        else
+            row "box update moved Plex to its new apt repository" "✅" "" ""
+        fi
+    fi
 else
     row "box update" "❌" "$secs" "exit ${rc}: $(tailnote /root/os-check-logs/box_update.log)"
 fi
