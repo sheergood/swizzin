@@ -1,5 +1,43 @@
 # Changelog
 
+## [sheergood-21] (Nov 28 2026)
+
+### Added
+- **Debian 13 (Trixie) is supported.** `setup.sh` accepts it and `box update` no longer sends
+  Trixie servers to the end-of-life branch. A real install on Debian 12 and Debian 13 passes for
+  autobrr, Deluge, Filebrowser, FileBrowser Quantum, Jellyfin, Prowlarr, qBittorrent, Radarr,
+  Sonarr, the panel, nginx, Let's Encrypt (acme.sh) and fail2ban with swizzin's web jails, plus
+  `box update` afterwards.
+- `os-check` now requires both releases to pass, including on upstream updates before they reach
+  `master`. It tests those apps by default.
+- Deluge and Jellyfin are on the `PROTECTED_APPS` list, so upstream changes to them wait for
+  your approval.
+
+### Fixed (Debian 12 and 13)
+- **New Deluge installs never started** (`deluged@` and `deluge-web@` failed, `/deluge` gave 502).
+  - fpm 1.17 (October 2025) builds Python packages with pip, which put Deluge's programs in
+    `/usr/local/bin` instead of `/usr/bin`. swizzin now installs fpm 1.16.0, and swaps a newer
+    fpm for it. An older fpm already on a server is left alone.
+  - When the deluge-torrent.org clone failed, the GitHub fallback cloned into the wrong folder.
+  - A failed build or package install still printed "Deluge installed". It now stops with an
+    error, and the build checks that the libtorrent Python binding really loads.
+- **Installs could fail with "Could not get lock /var/lib/apt/lists/lock"** when apt-daily or
+  another apt ran at the same time. `apt update` now waits up to 5 minutes for it.
+- Prowlarr, Radarr and Lidarr installs retry their download 3 times and treat an HTTP error as a
+  failed download. A bad response used to show up as "Failed to extract".
+
+### Fixed (Debian 13 only; Debian 12 builds exactly as before)
+- Deluge's libtorrent binding didn't load ("undefined symbol: ZSTD_initCStream"). Trixie's
+  static OpenSSL library needs zstd, so it is now added to the link, but only where OpenSSL needs it.
+- Deluge 2.0 and 2.1 use Python's `cgi` module, which Python 3.13 removed. Choosing them on
+  Python 3.13 or newer installs Deluge 2.2 instead, with a warning. The "Repo" choice is unchanged.
+
+### Test machine (os-check only)
+- Frees disk space first, because compiling Deluge and qBittorrent needs several GB. qBittorrent's
+  "Apt failed" on Trixie was a full disk.
+- Packages start their services like on a normal server. The Debian image's `policy-rc.d` had
+  stopped fail2ban from starting.
+
 ## [sheergood-20] (Nov 28 2026)
 
 ### Changed
