@@ -5,7 +5,7 @@ name: os-check
 # so a failure on a newer release can be told apart from a test problem.
 # Runs every Sunday (catches outside changes, like Plex moving its apt repository), before every
 # upstream update is promoted (upstream-sync.yml), and from Actions → os-check → Run workflow.
-# Debian 12 must pass; Debian 13 is reported but doesn't fail the run (not supported yet).
+# Debian 12 and 13 both must pass.
 # Nothing here touches any server or branch.
 on:
   schedule:
@@ -38,10 +38,9 @@ jobs:
           - release: bookworm
             allow: "no"
           - release: trixie
-            allow: "yes"   # not on swizzin's supported list yet: allowed in the test copy only
+            allow: "no"    # supported since sheergood-21
     runs-on: ubuntu-latest
     timeout-minutes: 330
-    continue-on-error: ${{ matrix.release != 'bookworm' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -73,7 +72,7 @@ jobs:
           docker exec swz rm -f /.dockerenv
           docker cp "$GITHUB_WORKSPACE" swz:/root/swizzin
           docker exec swz chown -R root:root /root/swizzin
-      - name: install, upgrade and check (several minutes; qBittorrent is compiled)
+      - name: install, upgrade and check (qBittorrent and other clients are compiled)
         run: |
           docker exec -e TERM=xterm -e APPS="${{ inputs.apps }}" -e ALLOW_RELEASE="${{ matrix.allow }}" swz bash /root/swizzin/.github/scripts/os-check.sh
       - name: results
