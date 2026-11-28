@@ -30,6 +30,66 @@ def field(text, name):
     return m.group(1).strip() if m else ""
 
 
+LOG_TAIL = 4 << 20       # bytes of fail2ban's log read for "failing now"
+FOUND = re.compile(r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d+ fail2ban\.filter\s+\[\d+\]:\s+INFO\s+\[([^\]]+)\] Found (\S+) - "
+                   r"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)")
+BAN = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d),\d+ fail2ban\.actions\s+\[\d+\]:\s+NOTICE\s+\[([^\]]+)\] (?:Restore )?Ban (\S+)")
+
+
+def logtarget():
+    out = client("get", "logtarget")
+    m = re.search(r"(/\S+)", out)
+    path = m.group(1) if m else "/var/log/fail2ban.log"
+    return path if os.path.isfile(path) else None
+
+
+def _ts(text):
+    try:
+        return int(time.mktime(time.strptime(text, "%Y-%m-%d %H:%M:%S")))
+    except ValueError:
+        return None
+
+
+def failing(path, jails, banned_now, now):
+    """Addresses that failed in a jail within its findtime and aren't banned (yet): from fail2ban's
+    own "Found" lines, counting only what came after that address's last ban in that jail."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - LOG_TAIL))
+            lines = f.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return []
+    last_ban, hits = {}, {}
+    for line in lines:
+        m = BAN.match(line)
+        if m:
+            t = _ts(m.group(1))
+            if t:
+                last_ban[(m.group(2), m.group(3))] = t
+                hits.pop((m.group(2), m.group(3)), None)
+            continue
+        m = FOUND.match(line)
+        if m and m.group(1) in jails:
+            t = _ts(m.group(3))
+            if t:
+                hits.setdefault((m.group(1), m.group(2)), []).append(t)
+    out = []
+    for (jail, ip), times in hits.items():
+        findtime, maxretry = jails[jail]
+        times = [t for t in times if t > now - findtime and t > last_ban.get((jail, ip), 0)]
+        if times and ip not in banned_now.get(jail, set()):
+            out.append({"ip": ip, "jail": jail, "count": len(times), "maxretry": maxretry, "last": max(times)})
+    out.sort(key=lambda x: x["last"], reverse=True)
+    return out[:50]
+
+
+def _int(text, default):
+    m = re.search(r"-?\d+", text or "")
+    return int(m.group(0)) if m else default
+
+
 def main():
     now = int(time.time())
     data = {"updated": now, "running": False, "jails": [], "recent": [], "bans_24h": 0, "bans_7d": 0}
@@ -50,6 +110,12 @@ def main():
                 "total_failed": int(field(st, "Total failed") or 0),
             })
         data["banned_now"] = sum(j["currently_banned"] for j in data["jails"])
+        # which addresses are behind "failing now"
+        path = logtarget()
+        if path:
+            limits = {j["name"]: (_int(client("get", j["name"], "findtime"), 600), _int(client("get", j["name"], "maxretry"), 5))
+                      for j in data["jails"] if j["currently_failed"]}
+            data["failing"] = failing(path, limits, banned_now, now) if limits else []
         if os.path.exists(DB):
             try:
                 con = sqlite3.connect("file:{}?mode=ro".format(DB), uri=True, timeout=5)

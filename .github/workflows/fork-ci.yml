@@ -38,7 +38,7 @@ jobs:
       - name: python collectors
         run: python3 -m py_compile scripts/panel-f2b-collect scripts/panel-host-collect scripts/panel-updates-check
       - name: update check (all sources faked)
-        run: python3 .github/scripts/test-panel-updates.py
+        run: python3 .github/scripts/test-panel-updates.py && python3 .github/scripts/test-f2b-collect.py
       - name: fail2ban web jails (config accepted, filters match only attacks)
         run: |
           sudo apt-get update -q > /dev/null && sudo apt-get install -y -q fail2ban > /dev/null
@@ -50,6 +50,10 @@ jobs:
           sudo systemctl stop nginx || true
           shellcheck -S warning -x sources/functions/servarr_hosts scripts/update/servarr-hosts.sh .github/scripts/test-servarr-hosts.sh
           sudo bash .github/scripts/test-servarr-hosts.sh
+      - name: bare-IP rule (domains and loopback served, bare IPv4/IPv6 closed, opt-out works)
+        run: |
+          shellcheck -S warning -x sources/functions/bare_ip scripts/update/nginx-bare-ip.sh .github/scripts/test-bare-ip.sh
+          sudo bash .github/scripts/test-bare-ip.sh
       - name: panel-upgrade refuses anything outside its list
         run: |
           set -u

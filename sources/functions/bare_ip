@@ -1,0 +1,71 @@
+#!/bin/bash
+# Requests to the server's bare IP address (http://203.0.113.7/, https://[2001:db8::7]/) get no
+# answer: nginx closes the connection (444). Every domain is unaffected, however many there are,
+# because only the address form of the name is matched. Loopback (127.0.0.1, ::1) keeps working
+# for the server's own tools. Ping and SSH aren't nginx, so they're unaffected too.
+# Applies to swizzin's default site (the "server_name _" blocks in /etc/nginx/sites-enabled/default).
+#
+# To allow bare-IP access again:  touch /etc/nginx/snippets/swizzin-bare-ip.allow  then  box update
+# Nothing is changed unless nginx accepts the new config; otherwise the previous files come back.
+# Part of the sheergood/swizzin fork. Licensed under GNU GPL v3.
+
+BARE_IP_SNIPPET=/etc/nginx/snippets/swizzin-no-bare-ip.conf
+BARE_IP_ALLOW=/etc/nginx/snippets/swizzin-bare-ip.allow
+BARE_IP_SITE=/etc/nginx/sites-enabled/default
+BARE_IP_INCLUDE="include ${BARE_IP_SNIPPET};"
+
+# the snippet's content: the rule, or (opted out) only a comment
+bare_ip_snippet() {
+    echo "# managed by swizzin (sources/functions/bare_ip); rewritten by box update."
+    echo "# Requests made to the server's bare IP address get no answer; domains and loopback work."
+    echo "# To allow bare-IP access: touch ${BARE_IP_ALLOW} && box update"
+    if [[ -f $BARE_IP_ALLOW ]]; then
+        echo "# (allowed: ${BARE_IP_ALLOW} exists)"
+    else
+        echo 'if ($host ~* "^(?:(?!127\.)[0-9]{1,3}(?:\.[0-9]{1,3}){3}|\[(?!::1\])[0-9a-f:.]+\])$") { return 444; }'
+    fi
+}
+
+# Adds the include after each "server_name _;" of the given site file. 0 = changed, 1 = nothing to do.
+bare_ip_site_patch() {
+    local site=$1
+    grep -qE '^\s*server_name _;' "$site" || return 1
+    grep -qF "$BARE_IP_INCLUDE" "$site" && return 1
+    sed -i -E "s|^(\s*)server_name _;\s*$|&\n\1${BARE_IP_INCLUDE}|" "$site"
+    return 0
+}
+
+bare_ip_apply() {
+    [[ -f $BARE_IP_SITE ]] || return 0
+    command -v nginx > /dev/null 2>&1 || return 0
+    local snip_prev site_prev had_snip=no new
+    mkdir -p "$(dirname "$BARE_IP_SNIPPET")"
+    new=$(bare_ip_snippet)
+    if [[ -f $BARE_IP_SNIPPET ]] && [[ $(cat "$BARE_IP_SNIPPET") == "$new" ]] && grep -qF "$BARE_IP_INCLUDE" "$BARE_IP_SITE"; then
+        return 0 # already as it should be
+    fi
+    snip_prev=$(mktemp)
+    site_prev=$(mktemp)
+    if [[ -f $BARE_IP_SNIPPET ]]; then
+        had_snip=yes
+        cp -p "$BARE_IP_SNIPPET" "$snip_prev"
+    fi
+    cp -p "$BARE_IP_SITE" "$site_prev"
+    printf '%s\n' "$new" > "$BARE_IP_SNIPPET"
+    chmod 644 "$BARE_IP_SNIPPET"
+    bare_ip_site_patch "$BARE_IP_SITE" || true
+    if nginx -t > /dev/null 2>&1; then
+        systemctl reload nginx > /dev/null 2>&1 || true
+        if [[ -f $BARE_IP_ALLOW ]]; then
+            echo_info "nginx: bare-IP access is allowed (${BARE_IP_ALLOW})"
+        else
+            echo_info "nginx: requests to the server's bare IP address now get no answer (domains unaffected)"
+        fi
+    else
+        echo_warn "nginx refused the bare-IP rule; kept the previous config"
+        cp -p "$site_prev" "$BARE_IP_SITE"
+        if [[ $had_snip == yes ]]; then cp -p "$snip_prev" "$BARE_IP_SNIPPET"; else rm -f "$BARE_IP_SNIPPET"; fi
+    fi
+    rm -f "$snip_prev" "$site_prev"
+    return 0
+}

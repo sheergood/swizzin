@@ -1,5 +1,28 @@
 # Changelog
 
+## [sheergood-14] (Nov 28 2026)
+
+### Added
+- **Requests made to the server's bare IP address get no answer.** nginx closes the connection
+  (444) on `http://<ip>/` and `https://<ip>/`, IPv4 and IPv6, so bots scanning IP ranges never see
+  a page or a login.
+  - Every domain is unaffected, however many there are, because only the address form of the
+    name is matched.
+  - Loopback (`127.0.0.1`, `::1`) keeps working for the server's own tools.
+  - Ping and SSH aren't nginx, so they're unaffected too.
+  - Applied to swizzin's default site by `box update` and by fresh nginx installs. The change is
+    kept only if nginx accepts it; otherwise the previous files come back.
+  - To allow bare-IP access again: `touch /etc/nginx/snippets/swizzin-bare-ip.allow`, then
+    `box update`.
+- **The Security card can show which addresses are "failing now"** (dashboard sheergood-23).
+  `panel-f2b-collect` reads fail2ban's own "Found" lines from its log. It counts an address's
+  failures within each jail's findtime, after that address's last ban, and leaves out addresses
+  that are banned right now.
+- CI:
+  - Bare-IP rule against swizzin's real default site: domains and loopback served, bare
+    IPv4/IPv6 closed on both ports, the opt-out works, and a second run changes nothing.
+  - "Failing now" parsing tests.
+
 ## [sheergood-13] (Nov 28 2026)
 
 ### Added

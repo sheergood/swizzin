@@ -255,5 +255,10 @@ echo_progress_done "Nginx restarted"
 . /etc/swizzin/sources/functions/php
 restart_php_fpm
 
+# requests to the server's bare IP address get no answer (domains unaffected); see sources/functions/bare_ip
+#shellcheck source=sources/functions/bare_ip
+. /etc/swizzin/sources/functions/bare_ip
+(bare_ip_apply) || true
+
 echo_success "Nginx installed"
 touch /install/.nginx.lock
