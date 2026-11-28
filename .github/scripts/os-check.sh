@@ -69,6 +69,27 @@ fi
 box=/etc/swizzin/scripts/box
 declare -A app_units=([nginx]=nginx [panel]=panel)
 
+# GitHub API calls (autobrr, Filebrowser, qui... look up their latest release there) get the job's
+# read-only token, so the shared anonymous limit can't fail the installs. Test machine only: curl is
+# wrapped, and the token goes to api.github.com and nowhere else.
+if [[ -n ${GH_TOKEN:-} && -x /usr/bin/curl && ! -e /usr/bin/curl.real ]]; then
+    install -m 600 /dev/null /root/.gh-token
+    printf '%s' "$GH_TOKEN" > /root/.gh-token
+    mv /usr/bin/curl /usr/bin/curl.real
+    cat > /usr/bin/curl << 'EOCURL'
+#!/bin/bash
+tok=$(cat /root/.gh-token 2> /dev/null)
+if [[ -n $tok ]]; then
+    for a in "$@"; do
+        if [[ $a == https://api.github.com/* ]]; then exec /usr/bin/curl.real -H "Authorization: Bearer ${tok}" "$@"; fi
+    done
+fi
+exec /usr/bin/curl.real "$@"
+EOCURL
+    chmod 755 /usr/bin/curl
+fi
+unset GH_TOKEN
+
 # --- 2. each app on its own; remember which services it created
 for app in $apps; do
     before=$(unitfiles)

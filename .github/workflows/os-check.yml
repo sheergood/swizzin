@@ -79,8 +79,12 @@ jobs:
           docker cp "$GITHUB_WORKSPACE" swz:/root/swizzin
           docker exec swz chown -R root:root /root/swizzin
       - name: install, upgrade and check (qBittorrent and other clients are compiled)
+        env:
+          # GitHub's anonymous API limit (60 an hour) is shared by every job on the runner's IP and kept
+          # breaking the GitHub-hosted installs; the job's read-only token is used for api.github.com only
+          GH_TOKEN: ${{ github.token }}
         run: |
-          docker exec -e TERM=xterm -e APPS="${{ inputs.apps }}" -e ALLOW_RELEASE="${{ matrix.allow }}" swz bash /root/swizzin/.github/scripts/os-check.sh
+          docker exec -e TERM=xterm -e GH_TOKEN -e APPS="${{ inputs.apps }}" -e ALLOW_RELEASE="${{ matrix.allow }}" swz bash /root/swizzin/.github/scripts/os-check.sh
       - name: results
         if: always()
         run: |
