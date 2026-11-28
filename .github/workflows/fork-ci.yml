@@ -82,6 +82,10 @@ jobs:
         run: |
           shellcheck -S warning .github/scripts/upstream-merge.sh .github/scripts/test-upstream-merge.sh
           bash .github/scripts/test-upstream-merge.sh
+      - name: fpm stays on the version that builds Deluge right
+        run: |
+          shellcheck -S warning -x .github/scripts/test-fpm-pin.sh
+          bash .github/scripts/test-fpm-pin.sh
       - name: no dangling helper references
         run: |
           missing=0

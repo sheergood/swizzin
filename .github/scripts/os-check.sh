@@ -150,6 +150,16 @@ for app in nginx panel $apps; do
             {
                 systemctl status "$u" --no-pager -l 2>&1 | head -n 30
                 journalctl -u "$u" -n 80 --no-pager 2>&1
+                # 203/EXEC means the program in ExecStart isn't there: show where the package put it
+                exe=$(systemctl show -p ExecStart "$u" 2> /dev/null | grep -oP 'path=\K[^ ;]+' | head -n1)
+                echo "--- ExecStart program: ${exe:-?}"
+                [[ -n $exe ]] && ls -l "$exe" 2>&1
+                pkg=$(dpkg -S "$(basename "${exe:-none}")" 2> /dev/null | head -n3)
+                echo "--- packages with that name: ${pkg:-none}"
+                for p in $(dpkg-query -W -f='${Package}\n' 2> /dev/null | grep -E "^(deluge|python3-deluge)"); do
+                    echo "--- files of $p (bin)"
+                    dpkg -L "$p" 2> /dev/null | grep -E '/bin/|dist-packages/deluge/?$|site-packages/deluge/?$' | head -n 20
+                done
             } > "$logs/zz_journal_${u}.log"
         fi
     done

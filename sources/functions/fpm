@@ -1,9 +1,37 @@
 #!/bin/bash
 
+# (sheergood fork) fpm 1.17 (October 2025) switched python packaging to pip, which ignores
+# --python-setup-py-arguments: Deluge's programs then land in /usr/local/bin and deluged@/deluge-web@
+# fail with 203/EXEC. Stay on the last release that builds the way swizzin expects.
+fpm_version="1.16.0"
+
+function _fpm_pin() {
+    local v
+    gem list fpm --exact 2> /dev/null | grep -q "[( ]${fpm_version}[,)]" || gem install fpm -v "${fpm_version}" >> $log 2>&1 || return 1
+    for v in $(gem list fpm --exact 2> /dev/null | grep -oP '^fpm \(\K[^)]*' | tr -d ' ' | tr ',' ' '); do
+        v=${v#default:}
+        [[ $v == "${fpm_version}" ]] && continue
+        if dpkg --compare-versions "$v" gt "${fpm_version}"; then
+            gem uninstall fpm -v "$v" -x >> $log 2>&1
+        fi
+    done
+    # make sure the fpm command is there and is the pinned one
+    fpm --version 2> /dev/null | grep -qx "${fpm_version}" || gem pristine fpm -v "${fpm_version}" --only-executables >> $log 2>&1
+    fpm --version 2> /dev/null | grep -qx "${fpm_version}"
+}
+
 function install_fpm() {
     fpm -h > /dev/null 2>&1
     exit=$?
-    if [[ ! $exit == '0' ]]; then
+    if [[ $exit == '0' ]]; then
+        # already there: if it's a newer fpm, put the pinned one in its place
+        if ! fpm --version 2> /dev/null | grep -qx "${fpm_version}" \
+            && dpkg --compare-versions "$(fpm --version 2> /dev/null)" gt "${fpm_version}"; then
+            echo_progress_start "Installing fpm ${fpm_version} in place of $(fpm --version 2> /dev/null)"
+            _fpm_pin || echo_warn "Couldn't install fpm ${fpm_version}; packages built with fpm may be laid out wrongly"
+            echo_progress_done
+        fi
+    else
         apt_install ruby ruby-dev libffi-dev
         echo_progress_start "Installing fpm through ruby/gem"
         case $(_os_codename) in
@@ -16,7 +44,10 @@ function install_fpm() {
                 ;;
             *) ;;
         esac
-        gem install fpm >> $log 2>&1
+        gem install fpm -v "${fpm_version}" >> $log 2>&1 || {
+            echo_error "Installing fpm ${fpm_version} failed"
+            exit 1
+        }
         echo_progress_done
     fi
 }
