@@ -11,12 +11,15 @@
   |---|---|---|---|
   | `swizzin-panel` | wrong panel passwords | 8 in 10 min | 1 h |
   | `swizzin-nginx-auth` | wrong passwords for apps behind nginx's login (Sonarr, Radarr, Prowlarr, autobrr…) | 10 in 10 min | 1 h |
+  | `swizzin-filebrowser` | wrong passwords at Filebrowser's and FileBrowser Quantum's own login pages, which nginx's login doesn't cover (read from nginx's access log) | 8 in 10 min | 1 h |
   | `swizzin-scan` | requests for well-known attack paths (`wp-login.php`, `.env`, `.git/`, phpMyAdmin, `cgi-bin/`, phpunit…) that got an error answer | 2 in 1 h | 1 day |
 
   - `swizzin-panel` reads `/var/log/swizzin-panel/auth.log`, which the panel writes (dashboard
     sheergood-20).
   - `swizzin-nginx-auth` uses fail2ban's stock `nginx-http-auth` filter, so a first visit
     without a password never counts.
+  - The jails cover the site whether it's reached by its domain or the server's IP address:
+    nginx serves both with the same site (`server_name _`), so it's the same logs and the same ban.
 - Your own address can be kept from ever being banned:
   `/etc/fail2ban/jail.d/swizzin-web.local` with `[DEFAULT]` and `swizzin_ignoreip = <ip>`.
   Loopback is always kept.
@@ -30,7 +33,8 @@
   - If any of that fails, the previous files are put back and fail2ban is reloaded as it was.
 - CI:
   - fail2ban accepts the jails.
-  - Each filter matches only the attack lines in a sample log. It doesn't match normal traffic,
+  - Each filter matches only the attack lines in a sample log, including wrong Filebrowser and
+    Quantum logins. It doesn't match successful logins, normal traffic,
     `.env` inside a query string, attack paths that were answered with 200, attack paths in a
     referrer, or first visits without a password.
   - A second run changes nothing, and remove leaves nothing behind.

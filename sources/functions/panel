@@ -177,6 +177,8 @@ function panel_updates_remove() {
 #   swizzin-nginx-auth  10 wrong passwords for apps behind nginx's login (Sonarr, Radarr, ...) in
 #                       10 min (fail2ban's stock nginx-http-auth filter: a first visit without a
 #                       password never counts)
+#   swizzin-filebrowser 8 wrong passwords in 10 min at Filebrowser's or FileBrowser Quantum's own
+#                       login page (they don't use nginx's login; seen in nginx's access log)
 #   swizzin-scan        2 requests in 1 h for well-known attack paths (wp-login.php, .env, .git/,
 #                       phpMyAdmin, ...) that got an error answer
 # Bans start at 1 h (1 day for scanners) and double for repeat offenders, up to 1 day.
@@ -185,7 +187,8 @@ function panel_updates_remove() {
 # Nothing is changed unless fail2ban accepts the new configuration; otherwise the previous files
 # come back.
 PANEL_AUTH_LOG=/var/log/swizzin-panel/auth.log
-PANEL_F2B_FILES=(/etc/fail2ban/jail.d/swizzin-web.conf /etc/fail2ban/filter.d/swizzin-panel.conf /etc/fail2ban/filter.d/swizzin-scan.conf)
+PANEL_F2B_FILES=(/etc/fail2ban/jail.d/swizzin-web.conf /etc/fail2ban/filter.d/swizzin-panel.conf /etc/fail2ban/filter.d/swizzin-scan.conf
+    /etc/fail2ban/filter.d/swizzin-filebrowser.conf)
 # Writes the jail and filters into directory $1 (same layout as /etc/fail2ban); $2 = yes for the
 # nginx jails
 function panel_f2b_web_render() {
@@ -208,6 +211,13 @@ _paths = wp-login\.php|xmlrpc\.php|wp-config\.php|wp-admin/|wp-includes/|wp-cont
 failregex = ^<HOST> \S+ \S+ [^"]*"(?:GET|POST|HEAD|PUT|DELETE|OPTIONS|PROPFIND) (?:https?://[^/" ]+)?/(?:[^" ]*?/)?(?:%(_paths)s)[^" ]* HTTP/[0-9.]+" [45]\d\d\b
 ignoreregex =
 EOFILTER
+    cat > "$out/filter.d/swizzin-filebrowser.conf" << 'EOFILTER'
+# managed by swizzin (panel_f2b_web_setup): wrong passwords at Filebrowser (POST /filebrowser/api/login,
+# answered 403) and FileBrowser Quantum (POST /fbquantum/api/auth/login, answered 401), nginx access log
+[Definition]
+failregex = ^<HOST> \S+ \S+ [^"]*"POST /(?:filebrowser/api/login|fbquantum/api/auth/login)(?:\?[^" ]*)? HTTP/[0-9.]+" (?:401|403)\b
+ignoreregex =
+EOFILTER
     _f2b_jail() { # name filter logpath maxretry findtime bantime
         printf '\n[%s]\nenabled = true\nfilter = %s\nbackend = auto\nlogpath = %s\nport = http,https\n' "$1" "$2" "$3"
         printf 'maxretry = %s\nfindtime = %s\nbantime = %s\nbantime.increment = true\nbantime.maxtime = 1d\n' "$4" "$5" "$6"
@@ -223,6 +233,7 @@ EOFILTER
         _f2b_jail swizzin-panel swizzin-panel "$PANEL_AUTH_LOG" 8 10m 1h
         if [[ $nginx_jails == yes ]]; then
             _f2b_jail swizzin-nginx-auth nginx-http-auth /var/log/nginx/error.log 10 10m 1h
+            _f2b_jail swizzin-filebrowser swizzin-filebrowser /var/log/nginx/access.log 8 10m 1h
             _f2b_jail swizzin-scan swizzin-scan /var/log/nginx/access.log 2 1h 1d
         fi
     } > "$out/jail.d/swizzin-web.conf"

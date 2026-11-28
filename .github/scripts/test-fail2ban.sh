@@ -33,6 +33,13 @@ cat > "$t/access.log" << 'EOF'
 198.51.100.4 - - [28/Nov/2026:07:44:07 +0530] "GET /wp-login.php HTTP/1.1" 200 162 "-" "x"
 198.51.100.5 - - [28/Nov/2026:07:44:08 +0530] "GET /x HTTP/1.1" 404 162 "GET /wp-login.php HTTP/1.1\" 404" "x"
 EOF
+cat > "$t/fb.log" << 'EOF'
+203.0.113.30 - - [28/Nov/2026:07:44:00 +0530] "POST /filebrowser/api/login HTTP/2.0" 403 10 "-" "Mozilla"
+203.0.113.31 - - [28/Nov/2026:07:44:01 +0530] "POST /fbquantum/api/auth/login?username=admin HTTP/2.0" 401 10 "-" "Mozilla"
+198.51.100.4 - - [28/Nov/2026:07:44:02 +0530] "POST /filebrowser/api/login HTTP/2.0" 200 400 "-" "Mozilla"
+198.51.100.4 - - [28/Nov/2026:07:44:03 +0530] "GET /filebrowser/api/resources/ HTTP/2.0" 401 10 "-" "Mozilla"
+198.51.100.4 - - [28/Nov/2026:07:44:04 +0530] "POST /fbquantum/api/auth/login?username=me HTTP/2.0" 200 400 "-" "Mozilla"
+EOF
 cat > "$t/error.log" << 'EOF'
 2026/11/28 07:44:00 [error] 1234#1234: *5 user "admin": password mismatch, client: 203.0.113.20, server: example.com, request: "GET /sonarr HTTP/2.0", host: "example.com"
 2026/11/28 07:44:01 [error] 1234#1234: *6 no user/password was provided for basic authentication, client: 198.51.100.4, server: example.com, request: "GET /sonarr HTTP/2.0", host: "example.com"
@@ -52,6 +59,7 @@ check() { # log filter expected-matches expected-ip-list
 }
 check panel.log swizzin-panel 2 "2001:db8::5 203.0.113.7 "
 check access.log swizzin-scan 4 "203.0.113.9 "
+check fb.log swizzin-filebrowser 2 "203.0.113.30 203.0.113.31 "
 check error.log nginx-http-auth 2 "203.0.113.20 203.0.113.21 "
 
 # a second run changes nothing; remove takes everything away again
