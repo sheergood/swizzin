@@ -96,6 +96,7 @@ jobs:
             echo "::group::$(basename "$f")"; tail -n 60 "$f" | sed 's/\x1b\[[0-9;]*m//g'; echo "::endgroup::"
           done
           echo "::group::swizzin.log (last 200 lines)"; tail -n 200 results/swizzin-logs/swizzin.log 2> /dev/null | sed 's/\x1b\[[0-9;]*m//g'; echo "::endgroup::"
+          echo "::group::swizzin.log (download errors)"; grep -nE 'curl: \([0-9]+\)|^wget: |ERROR [45][0-9][0-9]|Could not resolve' results/swizzin-logs/swizzin.log 2> /dev/null | tail -n 40; echo "::endgroup::"
           echo "::group::swizzin.log (Deluge build)"; sed -n '/Building Deluge/,/Configuring Deluge/p' results/swizzin-logs/swizzin.log 2> /dev/null | sed 's/\x1b\[[0-9;]*m//g' | tail -n 150; echo "::endgroup::"
       - uses: actions/upload-artifact@v4
         if: always()
