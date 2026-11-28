@@ -23,9 +23,9 @@ cleanup() {
 }
 trap cleanup EXIT
 [[ -e /etc/swizzin ]] || ln -s "$repo" /etc/swizzin
-# the helper re-runs itself as the files' owners, so it must be readable by them
+# kept where the users can't read it, like /etc/swizzin -> /root/... on a dev install
 libdir=$(mktemp -d)
-chmod 755 "$libdir"
+chmod 700 "$libdir"
 install -m 755 "$repo/scripts/panel-upgrade-lib" "$libdir/panel-upgrade-lib"
 export SWZ_UPG_LIB="$libdir/panel-upgrade-lib" SWZ_SETTLE=1
 fake=$(mktemp -d)

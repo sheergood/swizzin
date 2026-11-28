@@ -29,7 +29,6 @@ import pwd
 import re
 import secrets
 import shutil
-import sqlite3
 import stat
 import subprocess
 import sys
@@ -204,9 +203,6 @@ def as_user(uid, gid, argv, stdin=None, stdout=None, timeout=1800):
         return 127, str(e)
 
 
-HELPER = os.path.abspath(__file__)
-
-
 def _safe_root_dir(d):
     """True if only root can change anything along the path to d (no symlinks, nothing group/world writable)."""
     d = os.path.abspath(d)
@@ -249,7 +245,13 @@ def actor_for(path, is_dir=False):
     return (0, 0) if _safe_root_dir(target if is_dir else os.path.dirname(path)) else None
 
 
-# child commands (run as the owner through as_user): read a file to stdout, write stdin to a file
+# What runs as the files' owner: passed to python with -c, so it never depends on the owner being able
+# to read this file (on a dev install /etc/swizzin can point into /root). Commands: read / sqlite /
+# write / remove / hash <path> [mode]; read and sqlite print a JSON header line, then the content.
+CHILD_SRC = r'''
+import hashlib, json, os, shutil, sqlite3, stat, sys, tempfile
+
+
 def child_read(path):
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -354,8 +356,26 @@ def child_hash(path):
     return 0
 
 
+def _main(argv):
+    cmd, rest = argv[0], argv[1:]
+    fn = {"read": child_read, "sqlite": child_sqlite, "remove": child_remove, "hash": child_hash}.get(cmd)
+    if fn:
+        return fn(rest[0])
+    if cmd == "write":
+        return child_write(rest[0], rest[1])
+    return 2
+
+
+sys.exit(_main(sys.argv[1:]))
+'''
+
+
+def child_argv(args):
+    return [sys.executable, "-I", "-c", CHILD_SRC] + list(args)
+
+
 def owner_cmd(uid, gid, args, **kw):
-    return as_user(uid, gid, [sys.executable, "-I", HELPER, "_child"] + args, **kw)
+    return as_user(uid, gid, child_argv(args), **kw)
 
 
 # --------------------------------------------------------------------------- what each app is made of
@@ -508,9 +528,9 @@ def _deb_from_cache(pkg, ver):
 
 def fingerprint(item, meta_item=None):
     """What the program part looks like now, to know whether a copy still matches what's installed."""
-    path = p(item["path"])
     if item["type"] == "debs":
         return " ".join("{}={}".format(k, pkg_version(k) or "-") for k in item["pkgs"])
+    path = p(item["path"])
     if item["type"] == "dir":
         h = hashlib.sha256()
         if not os.path.isdir(path) or os.path.islink(path):
@@ -530,7 +550,7 @@ def fingerprint(item, meta_item=None):
     if not act:
         return "absent" if not os.path.lexists(path) else "unreachable"
     try:
-        r = subprocess.run([sys.executable, "-I", HELPER, "_child", "hash", path], stdout=subprocess.PIPE,
+        r = subprocess.run(child_argv(["hash", path]), stdout=subprocess.PIPE,
                            stderr=subprocess.DEVNULL, preexec_fn=lambda: _drop_to(*act), timeout=600, cwd="/")
         return r.stdout.decode().strip() or "unreadable"
     except (OSError, subprocess.SubprocessError):
@@ -964,14 +984,6 @@ def arr_wait(app, timeout=180):
 
 # --------------------------------------------------------------------------- command line
 def main(argv):
-    if argv[:1] == ["_child"]:
-        cmd, rest = argv[1], argv[2:]
-        fn = {"read": child_read, "sqlite": child_sqlite, "remove": child_remove, "hash": child_hash}.get(cmd)
-        if fn:
-            return fn(rest[0])
-        if cmd == "write":
-            return child_write(rest[0], rest[1])
-        return 2
     ap = argparse.ArgumentParser(prog="panel-upgrade-lib")
     sub = ap.add_subparsers(dest="cmd", required=True)
     for c in ("units", "snap-check", "snap-verify-last", "snap-verify-undo", "rollbacks", "installed", "can-rollback"):

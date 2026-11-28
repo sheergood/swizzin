@@ -17,10 +17,11 @@ import threading
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# the helper re-runs itself as the files' owners, so it must sit where any user can read it
+# kept where the test users can't read it: what runs as a file's owner must not need this file
+# (on a dev install /etc/swizzin points into /root)
 _SRC = os.path.join(HERE, "..", "..", "scripts", "panel-upgrade-lib")
 _LIBDIR = tempfile.mkdtemp(prefix="swz-lib-")
-os.chmod(_LIBDIR, 0o755)
+os.chmod(_LIBDIR, 0o700)
 LIB = os.path.join(_LIBDIR, "panel-upgrade-lib")
 shutil.copy(_SRC, LIB)
 os.chmod(LIB, 0o755)
@@ -38,7 +39,6 @@ def load(fs, base):
     spec = importlib.util.spec_from_loader("panel_upgrade_lib", loader)
     mod = importlib.util.module_from_spec(spec)
     loader.exec_module(mod)
-    mod.HELPER = os.path.abspath(LIB)
     return mod
 
 
@@ -241,6 +241,12 @@ class Servarr(Base):
         self.assertEqual(con.execute("select v from t").fetchone()[0], "old")
         con.close()
         self.assertTrue(self.lib.snap_verify("prowlarr", "last"))
+
+
+class Packages(Base):
+    def test_package_fingerprint_needs_no_path(self):
+        fp = self.lib.fingerprint({"type": "debs", "pkgs": ["swz-no-such-package"], "role": "prog"})
+        self.assertEqual(fp, "swz-no-such-package=-")
 
 
 class History(Base):
