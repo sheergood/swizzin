@@ -1,5 +1,29 @@
 # Changelog
 
+## [sheergood-23] (Nov 28 2026)
+
+### Added (with the panel's sheergood-27)
+- **swizzin-disk.timer** runs `panel-disk-collect` every 3 hours at the lowest CPU and disk priority:
+  - It records used, size and available for each filesystem the panel lists. 90 days are kept, and
+    the panel draws the last 30 and works out growth and "full in about" from them.
+  - Every 6 hours it measures what fills each filesystem: downloads (from qBittorrent, Deluge,
+    rTorrent and Transmission's own settings), media libraries (Sonarr, Radarr and Lidarr root
+    folders, Plex and Jellyfin libraries), Plex/Jellyfin data, apps and their settings, other home
+    files, logs, system, and other.
+  - One `du` run covers everything: folders inside other folders come first, then downloads. So
+    categories never overlap, hard links are counted once, and categories plus other equal the used
+    space df reports.
+  - Users' config files are read without following symlinks, and a download or library folder set
+    to `/` (or another system folder) is ignored.
+- It's set up on install and on `box update`, and removed with the panel.
+
+### Tested
+- `test-disk-collect.py` with the real `du` on a test folder tree: the sums add up exactly, hard links
+  are counted once, nested folders are handled, a symlinked config isn't read, and history spacing
+  and age limits hold.
+- os-check on Debian 12 and 13: a real scan after installing your apps; the logs and Jellyfin
+  categories match a separate `du` of those folders.
+
 ## [sheergood-22] (Nov 28 2026)
 
 ### Added (with the panel's sheergood-26)

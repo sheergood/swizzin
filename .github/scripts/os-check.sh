@@ -268,7 +268,9 @@ import json, re, sys
 cur = tuple(int(x) for x in re.findall(r'\d+', sys.argv[1])[:4])
 ups = [u for u in json.load(sys.stdin) if u.get('url') and tuple(int(x) for x in re.findall(r'\d+', u.get('version', ''))[:4]) < cur]
 ups.sort(key=lambda u: tuple(int(x) for x in re.findall(r'\d+', u['version'])[:4]), reverse=True)
-print(ups[0]['version'], ups[0]['url']) if ups else None" "$cur" 2> /dev/null)
+# two steps back when there is one: the newest release can be ahead of what the updater offers for a day
+pick = ups[1] if len(ups) > 1 and ups[1]['version'].split('.')[0] == sys.argv[1].split('.')[0] else (ups[0] if ups else None)
+print(pick['version'], pick['url']) if pick else None" "$cur" 2> /dev/null)
     if [[ -z $cur || -z $older ]]; then
         row "panel: Prowlarr update + rollback" "➖" "" "no older Prowlarr offered by its update list (installed ${cur:-?})"
     else
