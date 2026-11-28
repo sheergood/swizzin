@@ -1,5 +1,21 @@
 # Changelog
 
+## [sheergood-18] (Nov 28 2026)
+
+### Added
+- **`os-check` workflow: does swizzin work on a Debian release?** (Actions → os-check → Run
+  workflow). It runs in a throwaway Debian container with systemd:
+  1. a real fresh install from this checkout (swizzin, nginx, panel);
+  2. each app one by one (by default autobrr, Filebrowser, Prowlarr, Radarr, Sonarr, qBittorrent
+     and Plex);
+  3. `box update`;
+  4. a check that every service runs and answers through nginx.
+
+  Debian 12 runs the same test as a control. Debian 13 (Trixie) isn't on swizzin's supported
+  list, so it is allowed in the test copy only; nothing about supported releases changes for
+  servers. Each step is recorded, failed ones too, and the logs are kept as a download for 14
+  days.
+
 ## [sheergood-17] (Nov 28 2026)
 
 ### Changed

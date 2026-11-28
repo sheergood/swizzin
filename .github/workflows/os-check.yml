@@ -1,0 +1,75 @@
+name: os-check
+# Does swizzin (this fork) work on a Debian release? A fresh install of swizzin + nginx + panel,
+# then each app, then `box update`, then a check that every service runs and answers, all in a
+# throwaway Debian container with systemd. Debian 12 (supported) runs the same test as a control,
+# so a failure on a newer release can be told apart from a test problem.
+# Run it from Actions → os-check → Run workflow. Nothing here touches any server or branch.
+on:
+  workflow_dispatch:
+    inputs:
+      apps:
+        description: "Apps to install (space separated)"
+        default: "autobrr filebrowser prowlarr radarr sonarr qbittorrent plex"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    if: github.repository == 'sheergood/swizzin'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - release: bookworm
+            allow: "no"
+          - release: trixie
+            allow: "yes"   # not on swizzin's supported list yet: allowed in the test copy only
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+      - name: Debian ${{ matrix.release }} container with systemd
+        run: |
+          set -e
+          cat > /tmp/Dockerfile << 'EOF'
+          ARG RELEASE
+          FROM debian:${RELEASE}
+          ENV container=docker
+          RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq systemd systemd-sysv dbus \
+                ca-certificates curl wget git lsb-release sudo procps iproute2 cron rsyslog > /dev/null \
+              && rm -f /lib/systemd/system/multi-user.target.wants/getty* \
+              && systemctl mask systemd-logind.service getty.target console-getty.service
+          STOPSIGNAL SIGRTMIN+3
+          CMD ["/lib/systemd/systemd"]
+          EOF
+          docker build -q --build-arg RELEASE=${{ matrix.release }} -t swz-os-check /tmp
+          docker run -d --name swz --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
+            --tmpfs /run --tmpfs /run/lock --hostname swz-os-check swz-os-check
+          for i in $(seq 1 60); do
+            s=$(docker exec swz systemctl is-system-running 2> /dev/null || true)
+            case $s in running | degraded) echo "systemd: $s"; break ;; esac
+            sleep 2
+          done
+          docker exec swz bash -c '. /etc/os-release; echo "$PRETTY_NAME"'
+          docker cp "$GITHUB_WORKSPACE" swz:/root/swizzin
+          docker exec swz chown -R root:root /root/swizzin
+      - name: install, upgrade and check (several minutes; qBittorrent is compiled)
+        run: |
+          docker exec -e APPS="${{ inputs.apps }}" -e ALLOW_RELEASE="${{ matrix.allow }}" swz bash /root/swizzin/.github/scripts/os-check.sh
+      - name: results
+        if: always()
+        run: |
+          mkdir -p results
+          docker cp swz:/root/os-check.md results/os-check.md 2> /dev/null || echo "no results table" > results/os-check.md
+          docker cp swz:/root/os-check-logs results/ 2> /dev/null || true
+          docker cp swz:/root/logs results/swizzin-logs 2> /dev/null || true
+          cat results/os-check.md >> "$GITHUB_STEP_SUMMARY"
+          cat results/os-check.md
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: os-check-${{ matrix.release }}
+          path: results/
+          retention-days: 14
