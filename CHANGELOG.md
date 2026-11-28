@@ -1,5 +1,15 @@
 # Changelog
 
+## [sheergood-20] (Nov 28 2026)
+
+### Changed
+- **Upstream updates must also pass a real install before they reach `master`.** `upstream-sync`
+  runs `os-check` on the merged result: a fresh install, your apps and `box update` in a Debian 12
+  container, with every service running. An update that breaks any of it isn't promoted.
+- `os-check` also runs every Sunday on `master`. Debian 12 must pass; Debian 13 is reported but
+  doesn't fail the run. Plex's service row is shown as not checkable in a container, because
+  Plex's package skips creating its service there.
+
 ## [sheergood-19] (Nov 28 2026)
 
 Found by the new `os-check` test (real installs in Debian 12 and 13 containers).

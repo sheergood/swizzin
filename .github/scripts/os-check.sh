@@ -116,6 +116,14 @@ unit_of() {
 }
 for app in nginx panel ${APPS:-autobrr filebrowser prowlarr radarr sonarr qbittorrent plex}; do
     u=$(unit_of "$app")
+    if [[ $app == plex ]] && ! systemctl cat plexmediaserver > /dev/null 2>&1 &&
+        dpkg-query -W -f='${db:Status-Status}' plexmediaserver 2> /dev/null | grep -q '^installed'; then
+        # Plex's package doesn't create its service inside containers ("Docker detected"); on a
+        # real server it does. What can be checked here: the package came from the new repository.
+        v=$(dpkg-query -W -f='${Version}' plexmediaserver)
+        printf '| %s | %s | %s | %s |\n' "running: plexmediaserver" "➖" "" "not checkable in a container (Plex skips its service there); package ${v} installed" >> "$out"
+        continue
+    fi
     # also apps whose install stopped half-way, if their service exists
     [[ -f /install/.${app}.lock || -f /etc/systemd/system/${u}.service || -f /etc/systemd/system/${u%@*}@.service ]] || continue
     if systemctl is-active -q "$u"; then

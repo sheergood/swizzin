@@ -3,14 +3,27 @@ name: os-check
 # then each app, then `box update`, then a check that every service runs and answers, all in a
 # throwaway Debian container with systemd. Debian 12 (supported) runs the same test as a control,
 # so a failure on a newer release can be told apart from a test problem.
-# Run it from Actions → os-check → Run workflow. Nothing here touches any server or branch.
+# Runs every Sunday (catches outside changes, like Plex moving its apt repository), before every
+# upstream update is promoted (upstream-sync.yml), and from Actions → os-check → Run workflow.
+# Debian 12 must pass; Debian 13 is reported but doesn't fail the run (not supported yet).
+# Nothing here touches any server or branch.
 on:
+  schedule:
+    - cron: "23 2 * * 0"   # Sundays 02:23 UTC = 07:53 IST
   workflow_dispatch:
     inputs:
       apps:
         description: "Apps to install (space separated)"
         default: "autobrr filebrowser prowlarr radarr sonarr qbittorrent plex"
         type: string
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        default: ""
+      apps:
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -28,8 +41,11 @@ jobs:
             allow: "yes"   # not on swizzin's supported list yet: allowed in the test copy only
     runs-on: ubuntu-latest
     timeout-minutes: 330
+    continue-on-error: ${{ matrix.release != 'bookworm' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
       - name: Debian ${{ matrix.release }} container with systemd
         run: |
           set -e

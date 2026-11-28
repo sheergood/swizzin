@@ -61,9 +61,13 @@ upstream commit ──(7 days old?)──► merge into upstream-sync ──► 
    - A merge conflict opens an issue.
    - Upstream changes to workflow files always need a merge by hand, because GitHub doesn't let
      the job change them.
-3. **Full CI on the merged result.** This runs the same tests as every push: shellcheck, the
-   panel and fail2ban tests, nginx config tests and the FileBrowser Quantum end-to-end test.
-   If anything fails, nothing changes and an issue says why.
+3. **Full CI on the merged result**, plus a **real install** (`os-check`). CI runs the same tests
+   as every push: shellcheck, the panel and fail2ban tests, nginx config tests and the
+   FileBrowser Quantum end-to-end test. `os-check` does a fresh swizzin install, adds your apps,
+   runs `box update`, and checks every service runs and answers through nginx, in a Debian 12
+   container. If anything fails, nothing changes and an issue says why. `os-check` also runs
+   every Sunday on `master`, so a change outside the fork (like Plex moving its apt repository)
+   shows up as a failed run, and GitHub emails you about failed scheduled runs.
 4. **Approval for anything risky.** The update is merged and tested, but waits for you, when it:
    - changes code `box update` runs on every server (`REVIEW_PATHS`: `scripts/box`, `setup.sh`,
      `sources/`, `scripts/update/`);

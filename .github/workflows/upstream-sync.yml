@@ -5,7 +5,8 @@ name: upstream-sync
 #
 #   1. merge   — merge upstream commits that are old enough (QUARANTINE_DAYS) into the scratch
 #                branch `upstream-sync` (real branches untouched)
-#   2. test    — run this fork's full CI on that branch
+#   2. test    — run this fork's full CI on that branch, and a real install + box update in a
+#                Debian 12 container (os-check.yml)
 #   3. promote — only if CI passed AND the change doesn't need your approval: tag the current
 #                master as pre-sync-* (instant rollback point), fast-forward master and custom,
 #                tag the result sync-*
@@ -80,9 +81,17 @@ jobs:
     with:
       ref: upstream-sync
 
+  os:
+    # a real fresh install + apps + box update in a Debian container (os-check.yml)
+    needs: merge
+    if: needs.merge.outputs.status == 'merged' || needs.merge.outputs.status == 'review'
+    uses: ./.github/workflows/os-check.yml
+    with:
+      ref: upstream-sync
+
   promote:
-    needs: [merge, test]
-    if: needs.merge.outputs.status == 'merged' && needs.test.result == 'success' && needs.merge.outputs.count != '0' && inputs.test_only != true
+    needs: [merge, test, os]
+    if: needs.merge.outputs.status == 'merged' && needs.test.result == 'success' && needs.os.result == 'success' && needs.merge.outputs.count != '0' && inputs.test_only != true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -108,7 +117,7 @@ jobs:
           git push origin "$SHA:refs/tags/sync-$stamp" || echo "::warning::tag sync-$stamp exists"
 
   report:
-    needs: [merge, test, promote]
+    needs: [merge, test, os, promote]
     if: always() && needs.merge.result != 'skipped'
     runs-on: ubuntu-latest
     env:
@@ -117,7 +126,7 @@ jobs:
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       MERGE_RESULT: ${{ needs.merge.result }}
       STATUS: ${{ needs.merge.outputs.status }}
-      TEST: ${{ needs.test.result }}
+      TEST: ${{ (needs.test.result == 'success' && needs.os.result == 'success') && 'success' || (needs.test.result == 'skipped' && 'skipped' || 'failure') }}
       PROMOTE: ${{ needs.promote.result }}
       TEST_ONLY: ${{ inputs.test_only == true }}
       SHA: ${{ needs.merge.outputs.sha }}
