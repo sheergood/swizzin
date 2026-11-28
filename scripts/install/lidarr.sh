@@ -62,6 +62,7 @@ config() {
 <Config>
   <Port>8686</Port>
   <UrlBase>lidarr</UrlBase>
+  <AllowedHosts>localhost,127.0.0.1</AllowedHosts>
   <BindAddress>*</BindAddress>
   <EnableSsl>False</EnableSsl>
   <LogLevel>Info</LogLevel>

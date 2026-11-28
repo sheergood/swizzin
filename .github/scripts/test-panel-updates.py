@@ -62,12 +62,15 @@ class UpdatesCheck(unittest.TestCase):
         puc.http_json = self.f.http_json
         puc.master_user = lambda: "alice"
         self.exists = os.path.exists
-        puc.os.path.exists = lambda p: True if p.startswith(("/usr/bin/autobrrctl", "/home/alice/bin/filebrowser", "/opt/fbquantum")) else self.exists(p)
+        puc.os.path.exists = lambda p: True if p.startswith(("/usr/bin/", "/home/alice/bin/filebrowser", "/opt/fbquantum")) else self.exists(p)
+        self.which = puc.shutil.which
+        puc.shutil.which = lambda name: "/usr/bin/" + name
 
     def tearDown(self):
         for k, v in self.saved.items():
             setattr(puc, k, v)
         puc.os.path.exists = self.exists
+        puc.shutil.which = self.which
         self.tmp.cleanup()
 
     def result(self):
@@ -107,7 +110,7 @@ class UpdatesCheck(unittest.TestCase):
         self.f.gh["repos/qbittorrent/qBittorrent/tags?per_page=100"] = [
             {"name": "release-5.1.0rc1"}, {"name": "release-5.0.4"}, {"name": "release-5.0.10"}, {"name": "release-4.6.7"}, {"name": "v3"}]
         q = self.result()["qbittorrent"]
-        self.assertEqual((q["latest"], q["available"], q["method"]), ("5.0.10", True, "ssh"))
+        self.assertEqual((q["latest"], q["available"], q["method"]), ("5.0.10", True, "user"))
 
     def test_plex_uses_dpkg_comparison(self):
         self.f.installed = {"plex"}
@@ -151,12 +154,51 @@ class UpdatesCheck(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(os.stat(puc.OUT).st_mode), 0o640)
 
     def test_unreadable_installed_version_is_an_error(self):
-        self.f.installed = {"qbittorrent"}
+        self.f.installed = {"navidrome"}
+        self.f.gh["repos/navidrome/navidrome/releases/latest"] = {"tag_name": "v0.64.2", "body": ""}
+        n = self.result()["navidrome"]                     # /opt/navidrome/navidrome isn't there in CI
+        self.assertIn("installed version", n["error"])
+        self.assertFalse(n.get("available", False))
+
+    def test_torrent_app_with_unreadable_version_is_left_off(self):
+        self.f.installed = {"qbittorrent", "transmission"}
         self.f.runs["qbittorrent-nox --version"] = (127, "")
         self.f.gh["repos/qbittorrent/qBittorrent/tags?per_page=100"] = [{"name": "release-5.0.4"}]
-        q = self.result()["qbittorrent"]
-        self.assertIn("installed version", q["error"])
-        self.assertFalse(q.get("available", False))
+        self.f.gh["repos/transmission/transmission/releases/latest"] = {"tag_name": "4.1.4", "body": ""}
+        self.assertEqual(self.result(), {})
+
+    def test_more_github_apps(self):
+        self.f.installed = {"netronome", "lounge", "transmission"}
+        self.f.runs["netronome version"] = (0, "netronome v0.16.0 (abc)")
+        self.f.runs["thelounge --version"] = (0, "v4.5.2")
+        self.f.runs["transmission-daemon -V"] = (0, "transmission-daemon 4.0.5 (a6fe2a64aa)")
+        self.f.gh["repos/autobrr/netronome/releases/latest"] = {"tag_name": "v0.17.0", "body": "- faster"}
+        self.f.gh["repos/thelounge/thelounge/releases/latest"] = {"tag_name": "v4.5.2", "body": ""}
+        self.f.gh["repos/transmission/transmission/releases/latest"] = {"tag_name": "4.1.4", "body": ""}
+        r = self.result()
+        self.assertEqual((r["netronome"]["available"], r["netronome"]["method"]), (True, "box"))
+        self.assertFalse(r["lounge"]["available"])
+        self.assertEqual((r["transmission"]["installed"], r["transmission"]["available"], r["transmission"]["method"]), ("4.0.5", True, "user"))
+
+    def test_apt_apps_versions(self):
+        self.f.installed = {"jellyfin", "ombi"}
+        self.f.runs["dpkg-query -W -f=${Version} jellyfin-server"] = (0, "10.10.6+deb12")
+        self.f.runs["apt-cache policy jellyfin-server"] = (0, "  Installed: 10.10.6+deb12\n  Candidate: 10.10.7+deb12\n")
+        self.f.runs["dpkg-query -W -f=${Version} ombi"] = (0, "4.47.1")
+        self.f.runs["apt-cache policy ombi"] = (0, "  Installed: 4.47.1\n  Candidate: 4.47.1\n")
+        self.f.runs["dpkg --compare-versions 10.10.6+deb12"] = (0, "")
+        self.f.runs["dpkg --compare-versions 4.47.1"] = (1, "")
+        r = self.result()
+        self.assertEqual((r["jellyfin"]["installed"], r["jellyfin"]["latest"], r["jellyfin"]["available"]), ("10.10.6", "10.10.7", True))
+        self.assertFalse(r["ombi"]["available"])
+
+    def test_lidarr_uses_api_v1(self):
+        self.f.installed = {"lidarr"}
+        with open(puc.ARR, "w") as fh:
+            json.dump({"lidarr": {"url": "http://127.0.0.1:8686/lidarr", "key": "l" * 32}}, fh)
+        self.f.http["/api/v1/system/status"] = {"version": "3.1.0.4875"}
+        self.f.http["/api/v1/update"] = [{"version": "3.2.1.5196", "installable": True, "changes": {"fixed": ["x"]}}]
+        self.assertTrue(self.result()["lidarr"]["available"])
 
     def test_version_parsing(self):
         self.assertEqual(puc.first_version("File Browser v2.27.0/abc"), "2.27.0")

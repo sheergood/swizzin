@@ -2,16 +2,18 @@
 # The only update commands the panel (user swizzin) may run as root:
 #   panel-upgrade check    start the app update check now (returns at once)
 #   panel-upgrade <app>    upgrade one app
-# Accepts autobrr, filebrowser, fbquantum or plex (installed ones only), refuses while another upgrade
+# Accepts autobrr, filebrowser, fbquantum, plex, navidrome, netronome, emby, lounge, jellyfin or ombi
+# (installed ones only), refuses while another upgrade
 # or a box command is running, then starts the upgrade as its own systemd job (panel-upgrade-run), so
 # it finishes even if the panel restarts. Prints "started" and returns at once.
-# Sonarr/Radarr/Prowlarr update themselves through their own API; qBittorrent is never upgraded here.
+# Sonarr/Radarr/Prowlarr/Lidarr update themselves through their own API; torrent clients and their
+# web UIs are never upgraded here.
 set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 app=${1:-}
 if (($# != 1)); then
-    echo "usage: panel-upgrade check | <autobrr|filebrowser|fbquantum|plex>" >&2
+    echo "usage: panel-upgrade check | <autobrr|filebrowser|fbquantum|plex|navidrome|netronome|emby|lounge|jellyfin|ombi>" >&2
     exit 2
 fi
 if [[ $app == check ]]; then
@@ -20,7 +22,7 @@ if [[ $app == check ]]; then
     exit 0
 fi
 case "$app" in
-    autobrr | filebrowser | fbquantum | plex) ;;
+    autobrr | filebrowser | fbquantum | plex | navidrome | netronome | emby | lounge | jellyfin | ombi) ;;
     *)
         echo "panel-upgrade: $app can't be upgraded from the panel" >&2
         exit 2

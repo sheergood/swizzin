@@ -1,5 +1,54 @@
 # Changelog
 
+## [sheergood-13] (Nov 28 2026)
+
+### Added
+- **Sonarr, Radarr, Prowlarr and Lidarr answer only to localhost (Allowed Hosts).** This clears
+  their new "Allowed Hosts is not configured" warning. These Servarr releases (Sep 2026 on) check
+  the Host header of every request.
+  - nginx passes `Host: 127.0.0.1` to them, instead of the site name the browser used, and no
+    longer sends `X-Forwarded-Host`. All your domains and the server IP keep working without
+    being listed.
+  - The apps' own redirects, such as a login page, are turned back into a path on your site.
+  - `config.xml` gets `<AllowedHosts>localhost,127.0.0.1</AllowedHosts>`, and each app is
+    restarted once to read it.
+  - The apps add `[::1]` and the machine name themselves. A request with any other Host is
+    refused with HTTP 400.
+  - The panel, the update check and app-to-app connections already use 127.0.0.1.
+- Done by `box update` (`scripts/update/servarr-hosts.sh`) and by the install templates.
+  - Only configs that still have swizzin's own lines are changed. An Allowed Hosts list you set
+    yourself is left alone.
+  - nginx must pass `nginx -t`, and the app must answer on 127.0.0.1 after its restart.
+    Otherwise the previous file is put back.
+  - It never fails `box update`.
+- **App updates for more apps.** Only apps swizzin still maintains and whose project released in
+  the last 6 months are included:
+
+  | Apps | Updated by |
+  |---|---|
+  | Navidrome, Netronome, Emby, The Lounge | their swizzin upgrade scripts |
+  | Jellyfin, Ombi | their own apt repositories (only their packages) |
+  | Lidarr | its own updater (API v1); `arr.json` now includes it |
+
+  Navidrome and Netronome keep the previous program and restore it if the app doesn't come back
+  up.
+- **Torrent apps are shown, never upgraded:** qBittorrent, rTorrent, ruTorrent, Flood,
+  Transmission and qui. A torrent app whose installed version can't be read is simply left off.
+  `panel-upgrade` refuses them.
+- Not included:
+  - Older than 6 months: Mylar, jfa-go, Airsonic, Quassel, Shell In A Box, Deluge, Organizr.
+  - Their upgrade script only migrates old installs, or asks questions: NZBGet, NZBHydra2.
+  - Rebuilds their Python environment (too invasive to run from a button): SABnzbd.
+  - They update themselves: Bazarr, Jackett, Tautulli, Medusa, SickChill, SickGear, Netdata,
+    Nextcloud.
+- CI:
+  - The Allowed Hosts changes pass `nginx -t`, both the new templates and old configs patched
+    in place.
+  - Through nginx, any site name or IP reaches the app as 127.0.0.1, and redirects stay on the
+    site.
+  - The `config.xml` variants are handled, and the admin's own list is kept.
+  - New update-check tests: GitHub apps, apt apps, Lidarr, and torrent apps left off.
+
 ## [sheergood-12] (Nov 28 2026)
 
 ### Added

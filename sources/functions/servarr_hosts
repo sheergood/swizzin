@@ -1,0 +1,142 @@
+#!/bin/bash
+# Sonarr, Radarr, Prowlarr and Lidarr: answer only to localhost ("Allowed Hosts").
+#
+# New Servarr releases (Sep 2026 on) check the Host header of every request and warn while
+# "Allowed Hosts" is empty. On swizzin these apps listen on 127.0.0.1 only and are reached
+# through nginx, so:
+#   - nginx passes Host 127.0.0.1 to the app (instead of the site name the browser used), so every
+#     domain and the server IP keep working without listing them, and rewrites the app's own
+#     redirects back to the site (relative paths);
+#   - config.xml gets <AllowedHosts>localhost,127.0.0.1</AllowedHosts>. The app then answers only to
+#     loopback names (it adds [::1] and the machine name itself); everything else gets HTTP 400.
+# The panel, the update check and app-to-app connections already use 127.0.0.1.
+#
+# Only files that still have swizzin's own lines are changed; an Allowed Hosts list you set
+# yourself is left alone. nginx must pass its config test, and the app must answer on 127.0.0.1
+# after its restart, or the previous files are put back.
+# Part of the sheergood/swizzin fork. Licensed under GNU GPL v3.
+
+SERVARR_APPS="sonarr:Sonarr radarr:Radarr prowlarr:Prowlarr lidarr:Lidarr"
+SERVARR_ALLOWED="localhost,127.0.0.1"
+# nginx: the app's redirects (built from the Host it was sent) back to a path on the site
+SERVARR_REDIRECT='proxy_redirect ~^https?://127\.0\.0\.1(?::[0-9]+)?(/.*)$ $1;'
+
+# Rewrites one swizzin-generated nginx app config in place. 0 = changed, 1 = nothing to change.
+servarr_nginx_patch() {
+    local conf=$1
+    grep -q 'proxy_set_header Host \$host;' "$conf" || return 1
+    sed -i \
+        -e 's/^\(\s*\)proxy_set_header Host \$host;/\1proxy_set_header Host 127.0.0.1;/' \
+        -e '/^\s*proxy_set_header X-Forwarded-Host \$host;\s*$/d' \
+        -e 's/^\(\s*\)proxy_redirect off;/\1'"$(printf '%s' "$SERVARR_REDIRECT" | sed 's/[\\&|/]/\\&/g')"'/' \
+        "$conf"
+    return 0
+}
+
+# Adds <AllowedHosts> to a config.xml that has none (or an empty one). 0 = changed, 1 = left alone.
+servarr_config_patch() {
+    local cfg=$1
+    grep -q '</Config>' "$cfg" || return 1
+    if grep -qE '<AllowedHosts>[^<[:space:]][^<]*</AllowedHosts>' "$cfg"; then
+        return 1 # the admin's own list
+    fi
+    sed -i -E '/<AllowedHosts\s*\/>|<AllowedHosts>\s*<\/AllowedHosts>/d' "$cfg"
+    sed -i "s#</Config>#  <AllowedHosts>${SERVARR_ALLOWED}</AllowedHosts>\n</Config>#" "$cfg"
+    return 0
+}
+
+# config.xml of an app: from the -data= of its unit, else the usual swizzin place
+servarr_config_path() {
+    local app=$1 folder=$2 data user
+    data=$(grep -oP '(?<=-data=)\S+' "/etc/systemd/system/${app}.service" 2> /dev/null | head -n1)
+    if [[ -n $data && -f ${data%/}/config.xml ]]; then
+        echo "${data%/}/config.xml"
+        return 0
+    fi
+    user=$(grep -oP '(?<=^User=)\S+' "/etc/systemd/system/${app}.service" 2> /dev/null | head -n1)
+    [[ -n $user && -f /home/${user}/.config/${folder}/config.xml ]] && echo "/home/${user}/.config/${folder}/config.xml"
+}
+
+# HTTP status of the app's /ping on 127.0.0.1 (000 = not answering)
+servarr_ping() {
+    local cfg=$1 port base
+    port=$(grep -oP '(?<=<Port>)[0-9]+' "$cfg" | head -n1)
+    base=$(grep -oP '(?<=<UrlBase>)[^<]*' "$cfg" | head -n1)
+    base=${base%/}
+    [[ -n $base && $base != /* ]] && base="/$base"
+    curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:${port:-0}${base}/ping"
+}
+
+servarr_hosts_apply() {
+    local pair app folder conf cfg tmpc tmpn code was_active changed_nginx=no
+    for pair in $SERVARR_APPS; do
+        app=${pair%%:*} folder=${pair#*:}
+        [[ -f /install/.${app}.lock ]] || continue
+
+        # 1. nginx first, so the browser's requests already arrive as 127.0.0.1
+        conf=/etc/nginx/apps/${app}.conf
+        if [[ -f $conf ]]; then
+            tmpn=$(mktemp)
+            cp -p "$conf" "$tmpn"
+            if servarr_nginx_patch "$conf"; then
+                if nginx -t > /dev/null 2>&1; then
+                    changed_nginx=yes
+                    echo_log_only "${folder}: nginx now passes Host 127.0.0.1"
+                else
+                    cp -p "$tmpn" "$conf"
+                    echo_warn "${folder}: nginx refused the localhost change; kept the previous config"
+                    rm -f "$tmpn"
+                    continue # don't restrict the app while nginx still sends the site name
+                fi
+            fi
+            rm -f "$tmpn"
+        fi
+        if [[ $changed_nginx == yes ]]; then
+            systemctl reload nginx > /dev/null 2>&1 || true
+            changed_nginx=no
+        fi
+
+        # 2. Allowed Hosts in config.xml (read at start, so the app is restarted)
+        cfg=$(servarr_config_path "$app" "$folder")
+        [[ -n $cfg ]] || continue
+        grep -qE '<AllowedHosts>[^<[:space:]][^<]*</AllowedHosts>' "$cfg" && continue
+        if [[ -f $conf ]] && grep -q 'proxy_set_header Host \$host;' "$conf"; then
+            continue # nginx still sends the site name (customised config): leave Allowed Hosts empty
+        fi
+        tmpc=$(mktemp)
+        cp -p "$cfg" "$tmpc"
+        was_active=no
+        systemctl is-active -q "$app" && was_active=yes
+        [[ $was_active == yes ]] && systemctl stop "$app"
+        if servarr_config_patch "$cfg"; then
+            chown --reference="$tmpc" "$cfg"
+            chmod --reference="$tmpc" "$cfg"
+        else
+            [[ $was_active == yes ]] && systemctl start "$app"
+            rm -f "$tmpc"
+            continue
+        fi
+        if [[ $was_active == no ]]; then
+            echo_log_only "${folder}: Allowed Hosts set to ${SERVARR_ALLOWED} (app was stopped)"
+            rm -f "$tmpc"
+            continue
+        fi
+        systemctl start "$app"
+        code=000
+        for _ in $(seq 1 90); do
+            sleep 2
+            code=$(servarr_ping "$cfg")
+            [[ $code != 000 ]] && break
+        done
+        if [[ $code == 000 || $code == 400 ]]; then
+            echo_warn "${folder} didn't answer on 127.0.0.1 after setting Allowed Hosts (HTTP ${code}); put the previous config back"
+            systemctl stop "$app"
+            cp -p "$tmpc" "$cfg"
+            systemctl start "$app"
+        else
+            echo_info "${folder}: Allowed Hosts set to localhost (reached through nginx as before)"
+        fi
+        rm -f "$tmpc"
+    done
+    return 0
+}

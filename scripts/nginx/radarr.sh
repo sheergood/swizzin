@@ -20,11 +20,10 @@ app_branch="master"
 cat > /etc/nginx/apps/$app_name.conf << ARRNGINX
 location ^~ /$app_baseurl {
     proxy_pass http://127.0.0.1:$app_port;
-    proxy_set_header Host \$host;
+    proxy_set_header Host 127.0.0.1;
     proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Host \$host;
     proxy_set_header X-Forwarded-Proto \$scheme;
-    proxy_redirect off;
+    proxy_redirect ~^https?://127\.0\.0\.1(?::[0-9]+)?(/.*)\$ \$1;
     proxy_http_version 1.1;
     proxy_set_header Upgrade \$http_upgrade;
     proxy_set_header Connection \$http_connection;
@@ -70,6 +69,7 @@ cat > "$app_configdir"/config.xml << ARRCONFIG
   <ApiKey>${apikey}</ApiKey>
   <AuthenticationMethod>None</AuthenticationMethod>
   <UrlBase>$app_baseurl</UrlBase>
+  <AllowedHosts>localhost,127.0.0.1</AllowedHosts>
   <Branch>$app_branch</Branch>
 </Config>
 ARRCONFIG

@@ -10,7 +10,7 @@ export PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin
 export DEBIAN_FRONTEND=noninteractive TERM=xterm HOME=/root
 
 app=${1:-}
-case "$app" in autobrr | filebrowser | fbquantum | plex) ;; *) exit 2 ;; esac
+case "$app" in autobrr | filebrowser | fbquantum | plex | navidrome | netronome | emby | lounge | jellyfin | ombi) ;; *) exit 2 ;; esac
 dir=/var/lib/swizzin/upgrades
 mkdir -p "$dir"
 chmod 0750 "$dir"
@@ -54,6 +54,8 @@ chmod 0640 "$log"
 master=$(cut -d: -f1 < /root/.master.info 2> /dev/null || true)
 bins=()
 units=()
+apt_list=""
+apt_pkgs=()
 case "$app" in
     autobrr)
         bins=(/usr/bin/autobrr /usr/bin/autobrrctl)
@@ -68,7 +70,33 @@ case "$app" in
         if systemctl is-active -q filebrowser 2> /dev/null; then units+=(filebrowser); fi
         ;;
     plex)
+        apt_list=plexmediaserver.list apt_pkgs=(plexmediaserver)
         if systemctl is-active -q plexmediaserver 2> /dev/null; then units+=(plexmediaserver); fi
+        ;;
+    jellyfin)
+        apt_list=jellyfin.list apt_pkgs=(jellyfin jellyfin-server jellyfin-web)
+        if systemctl is-active -q jellyfin 2> /dev/null; then units+=(jellyfin); fi
+        ;;
+    ombi)
+        apt_list=ombi.list apt_pkgs=(ombi)
+        if systemctl is-active -q ombi 2> /dev/null; then units+=(ombi); fi
+        ;;
+    navidrome)
+        bins=(/opt/navidrome/navidrome)
+        if systemctl is-active -q navidrome 2> /dev/null; then units+=(navidrome); fi
+        ;;
+    netronome)
+        bins=(/usr/bin/netronome)
+        mapfile -t users < <(find /root/ -maxdepth 1 -name '*.info' -exec cut -d: -f1 {} \; 2> /dev/null | sort -u)
+        for u in "${users[@]}"; do
+            if [[ -n $u ]] && systemctl is-active -q "netronome@${u}" 2> /dev/null; then units+=("netronome@${u}"); fi
+        done
+        ;;
+    emby)
+        if systemctl is-active -q emby-server 2> /dev/null; then units+=(emby-server); fi
+        ;;
+    lounge)
+        if systemctl is-active -q lounge 2> /dev/null; then units+=(lounge); fi
         ;;
     *) ;; # fbquantum: its own upgrade script backs up, health-checks and rolls back
 esac
@@ -79,13 +107,14 @@ for b in "${bins[@]}"; do
     if [[ -f $b ]]; then cp -p "$b" "${b}.panel-prev"; fi
 done
 
-if [[ $app == plex ]]; then
-    lst=/etc/apt/sources.list.d/plexmediaserver.list
+if [[ -n $apt_list ]]; then
+    # only this app's packages, from its own repository; packages that aren't installed are skipped
+    lst=/etc/apt/sources.list.d/$apt_list
     if [[ -f $lst ]]; then
         apt-get update -q -o Dir::Etc::sourcelist="$lst" -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 >> "$log" 2>&1
     fi
     apt-get install -y -q --only-upgrade -o DPkg::Lock::Timeout=300 -o Dpkg::Options::=--force-confold \
-        plexmediaserver >> "$log" 2>&1 < /dev/null
+        "${apt_pkgs[@]}" >> "$log" 2>&1 < /dev/null
     rc=$?
 else
     # the same environment box gives its upgrade scripts, without box's full self-update first

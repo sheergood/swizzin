@@ -16,6 +16,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
+          fetch-depth: 2   # the Allowed Hosts test patches the previous nginx templates too
       - name: file permissions (scripts 755, sources 644)
         run: ./.github/scripts/check-permissions.sh
       - name: bash syntax
@@ -43,10 +44,16 @@ jobs:
           sudo apt-get update -q > /dev/null && sudo apt-get install -y -q fail2ban > /dev/null
           shellcheck -S warning -x .github/scripts/test-fail2ban.sh
           sudo bash .github/scripts/test-fail2ban.sh
+      - name: Servarr Allowed Hosts (templates, in-place patch, Host seen through nginx, config.xml)
+        run: |
+          sudo apt-get install -y -q nginx-light > /dev/null || sudo apt-get install -y -q nginx > /dev/null
+          sudo systemctl stop nginx || true
+          shellcheck -S warning -x sources/functions/servarr_hosts scripts/update/servarr-hosts.sh .github/scripts/test-servarr-hosts.sh
+          sudo bash .github/scripts/test-servarr-hosts.sh
       - name: panel-upgrade refuses anything outside its list
         run: |
           set -u
-          for a in qbittorrent sonarr 'autobrr;id' '../x' '' check2; do
+          for a in qbittorrent rtorrent transmission sonarr lidarr 'autobrr;id' '../x' '' check2; do
             rc=0; sudo scripts/panel-upgrade "$a" > /dev/null 2>&1 || rc=$?
             [[ $rc -eq 2 ]] || { echo "::error::panel-upgrade '$a' exited $rc, expected 2"; exit 1; }
           done

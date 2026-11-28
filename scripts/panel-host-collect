@@ -4,7 +4,7 @@
 #   /var/lib/swizzin/hostinfo.json  memory modules from dmidecode (needs root), world-readable
 #   /var/lib/swizzin/plex-token     Plex's local API token, readable only by the panel (root:swizzin 0640),
 #                                   so the panel can show "Now playing". Removed when Plex isn't installed.
-#   /var/lib/swizzin/arr.json       Sonarr/Radarr/Prowlarr local address + API key (root:swizzin 0640) for the panel's
+#   /var/lib/swizzin/arr.json       Sonarr/Radarr/Prowlarr/Lidarr local address + API key (root:swizzin 0640) for the panel's
 #                                   "Media queue". Removed when neither is installed.
 # Read-only towards the system. Part of the sheergood/swizzin fork. Licensed under GNU GPL v3.
 import glob
@@ -24,7 +24,7 @@ OUT = "/var/lib/swizzin/hostinfo.json"
 TOKEN = "/var/lib/swizzin/plex-token"
 PLEX_PREFS = "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Preferences.xml"
 ARR = "/var/lib/swizzin/arr.json"
-ARR_APPS = {"sonarr": "Sonarr", "radarr": "Radarr", "prowlarr": "Prowlarr"}   # app -> config folder name
+ARR_APPS = {"sonarr": "Sonarr", "radarr": "Radarr", "prowlarr": "Prowlarr", "lidarr": "Lidarr"}   # app -> config folder name
 PANEL_GROUP = "swizzin"
 
 

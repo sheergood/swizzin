@@ -4,10 +4,12 @@
 # swizzin-updates.service). For each installed app it compares the installed version with the newest
 # release and writes /var/lib/swizzin/updates.json (root:swizzin 0640) for the dashboard:
 #
-#   autobrr, Filebrowser, FileBrowser Quantum   GitHub releases             updated by `box upgrade` (panel-upgrade)
-#   Plex                                        Plex's apt repository       apt upgrade of plexmediaserver only
-#   Sonarr, Radarr, Prowlarr                    the app's own updater API   the app updates itself
-#   qBittorrent                                 GitHub tags                 shown only; built from source over SSH
+#   autobrr, Filebrowser, FileBrowser Quantum,  GitHub releases             swizzin's own upgrade script (panel-upgrade)
+#   Navidrome, Netronome, Emby, The Lounge
+#   Plex, Jellyfin, Ombi                        the app's apt repository    apt upgrade of that app's packages only
+#   Sonarr, Radarr, Prowlarr, Lidarr            the app's own updater API   the app updates itself
+#   torrent clients and their web UIs           GitHub releases / tags      shown only; you update them yourself
+#   (qBittorrent, rTorrent, ruTorrent, Flood, Transmission, qui)
 #
 # Release notes are cut to a sensible size. Nothing here installs anything. A failed check keeps the
 # previous answer for that app and records why, so one unreachable source never blanks the card.
@@ -16,6 +18,7 @@ import grp
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -93,6 +96,59 @@ def installed(app):
 
 
 # --------------------------------------------------------------------------- per app
+def cmd_version(*cmds):
+    """First version number printed by the first of these commands that exists."""
+    for cmd in cmds:
+        exe = cmd[0] if os.path.isabs(cmd[0]) else shutil.which(cmd[0])
+        if not exe or not os.path.exists(exe):
+            continue
+        v = first_version(run([exe] + list(cmd[1:]))[1])
+        if v:
+            return v
+    return None
+
+
+def as_nobody(*cmd):
+    """Run a version query as an unprivileged user (some apps refuse root or write config)."""
+    return ["runuser", "-u", "nobody", "--"] + list(cmd)
+
+
+def gh_app(repo, installed, method="box"):
+    d = gh_release(repo)
+    d.update(installed=installed, method=method)
+    return d
+
+
+def gh_tags(repo, pattern):
+    """Newest stable tag matching pattern (for projects without GitHub releases)."""
+    tags = gh("repos/{}/tags?per_page=100".format(repo))
+    vers = [first_version(t.get("name")) for t in tags if re.match(pattern, str(t.get("name", "")))]
+    vers = [v for v in vers if v]
+    if not vers:
+        raise RuntimeError("no release tags found")
+    return max(vers, key=vtuple)
+
+
+def apt_app(pkg, listfile, url):
+    """Installed vs candidate version of a package from the app's own apt repository (only that list
+    is refreshed)."""
+    rc, cur = run(["dpkg-query", "-W", "-f=${Version}", pkg])
+    if rc != 0 or not cur.strip():
+        raise RuntimeError("{} isn't installed as a package".format(pkg))
+    cur = cur.strip()
+    lst = "/etc/apt/sources.list.d/" + listfile
+    if os.path.exists(lst):
+        run(["apt-get", "update", "-qq", "-o", "Dir::Etc::sourcelist=" + lst, "-o", "Dir::Etc::sourceparts=-",
+             "-o", "APT::Get::List-Cleanup=0"], timeout=120)
+    cand = re.search(r"Candidate:\s*(\S+)", run(["apt-cache", "policy", pkg])[1])
+    latest = cand.group(1) if cand and cand.group(1) != "(none)" else cur
+    def short(v):   # 1:10.10.7+deb12-1 -> 10.10.7, 1.41.3.9314-a0bfb8370 -> 1.41.3.9314
+        core = re.split(r"[-+~]", v.split(":", 1)[-1], 1)[0]
+        return ".".join(re.findall(r"\d+", core)[:4]) or v
+    return {"installed": short(cur), "latest": short(latest), "notes": "", "url": url, "method": "apt",
+            "available_override": run(["dpkg", "--compare-versions", cur, "lt", latest])[0] == 0}
+
+
 def gh_release(repo):
     r = gh("repos/{}/releases/latest".format(repo))
     return {"latest": first_version(r.get("tag_name")), "notes": trim_notes(r.get("body")),
@@ -137,19 +193,7 @@ def check_fbquantum():
 
 
 def check_plex():
-    rc, cur = run(["dpkg-query", "-W", "-f=${Version}", "plexmediaserver"])
-    if rc != 0:
-        raise RuntimeError("plexmediaserver isn't installed as a package")
-    lst = "/etc/apt/sources.list.d/plexmediaserver.list"
-    if os.path.exists(lst):   # refresh Plex's own repository only; nothing else changes
-        run(["apt-get", "update", "-qq", "-o", "Dir::Etc::sourcelist=" + lst, "-o", "Dir::Etc::sourceparts=-",
-             "-o", "APT::Get::List-Cleanup=0"], timeout=120)
-    cand = re.search(r"Candidate:\s*(\S+)", run(["apt-cache", "policy", "plexmediaserver"])[1])
-    latest = cand.group(1) if cand and cand.group(1) != "(none)" else cur
-    short = lambda v: ".".join(re.findall(r"\d+", v)[:4])
-    return {"installed": short(cur), "latest": short(latest), "notes": "",
-            "url": "https://forums.plex.tv/t/plex-media-server/30447", "method": "apt",
-            "available_override": run(["dpkg", "--compare-versions", cur, "lt", latest])[0] == 0}
+    return apt_app("plexmediaserver", "plexmediaserver.list", "https://forums.plex.tv/t/plex-media-server/30447")
 
 
 def check_qbittorrent():
@@ -162,13 +206,75 @@ def check_qbittorrent():
     if not stable:
         raise RuntimeError("no qBittorrent release tags found")
     latest = max(stable, key=vtuple)
-    return {"installed": cur, "latest": latest, "notes": "", "method": "ssh",
+    return {"installed": cur, "latest": latest, "notes": "", "method": "user",
             "url": "https://www.qbittorrent.org/news"}
+
+
+def check_navidrome():
+    return gh_app("navidrome/navidrome", cmd_version(["/opt/navidrome/navidrome", "--version"]))
+
+
+def check_netronome():
+    return gh_app("autobrr/netronome", cmd_version(["/usr/bin/netronome", "version"], ["/usr/bin/netronome", "--version"]))
+
+
+def check_emby():
+    rc, cur = run(["dpkg-query", "-W", "-f=${Version}", "emby-server"])
+    d = gh_release("MediaBrowser/Emby.Releases")
+    d.update(installed=first_version(cur) if rc == 0 else None, method="box")
+    return d
+
+
+def check_lounge():
+    return gh_app("thelounge/thelounge", cmd_version(as_nobody("thelounge", "--version")))
+
+
+def check_jellyfin():
+    d = apt_app("jellyfin-server", "jellyfin.list", "https://github.com/jellyfin/jellyfin/releases")
+    return d
+
+
+def check_ombi():
+    return apt_app("ombi", "ombi.list", "https://github.com/Ombi-app/Ombi/releases")
+
+
+# torrent clients and their web UIs: shown only, never upgraded from the panel
+def check_rtorrent():
+    cur = cmd_version(as_nobody("rtorrent", "-h"))
+    return {"installed": cur, "latest": gh_tags("rakshasa/rtorrent", r"^v?\d+\.\d+\.\d+$"), "notes": "",
+            "url": "https://github.com/rakshasa/rtorrent/releases", "method": "user"}
+
+
+def check_rutorrent():
+    cur = None
+    try:
+        with open("/srv/rutorrent/js/webui.js", errors="replace") as f:
+            m = re.search(r"""version\s*:\s*["']v?(\d+(?:\.\d+){1,3})["']""", f.read(200000))
+            cur = m.group(1) if m else None
+    except OSError:
+        pass
+    return gh_app("Novik/ruTorrent", cur, "user")
+
+
+def check_flood():
+    return gh_app("jesec/flood", cmd_version(as_nobody("flood", "--version")), "user")
+
+
+def check_transmission():
+    return gh_app("transmission/transmission", cmd_version(as_nobody("transmission-daemon", "-V")), "user")
+
+
+def check_qui():
+    return gh_app("autobrr/qui", cmd_version(["/usr/bin/qui", "version"], ["/usr/bin/qui", "--version"]), "user")
+
+
+# torrent apps: when the installed version can't be read the app is simply left off the card
+USER_UPDATED = {"qbittorrent", "rtorrent", "rutorrent", "flood", "transmission", "qui"}
 
 
 def check_arr(app, conf):
     """Sonarr/Radarr (API v3) and Prowlarr (v1): ask the app itself; it also says whether it can update itself."""
-    v = "v1" if app == "prowlarr" else "v3"
+    v = "v1" if app in ("prowlarr", "lidarr") else "v3"
     h = {"X-Api-Key": conf["key"]}
     try:
         status = http_json("{}/api/{}/system/status".format(conf["url"], v), h, timeout=10)
@@ -190,7 +296,8 @@ def check_arr(app, conf):
     return {"installed": cur, "latest": best["version"] if best else cur, "notes": trim_notes(notes),
             "method": "self" if (best or {}).get("installable", True) else "self-blocked",
             "url": {"sonarr": "https://github.com/Sonarr/Sonarr/releases", "radarr": "https://github.com/Radarr/Radarr/releases",
-                    "prowlarr": "https://github.com/Prowlarr/Prowlarr/releases"}[app],
+                    "prowlarr": "https://github.com/Prowlarr/Prowlarr/releases",
+                    "lidarr": "https://github.com/Lidarr/Lidarr/releases"}[app],
             "branch": (best or {}).get("branch")}
 
 
@@ -208,9 +315,12 @@ def main():
         arr = {}
     checks = {
         "autobrr": check_autobrr, "filebrowser": check_filebrowser, "fbquantum": check_fbquantum,
-        "plex": check_plex, "qbittorrent": check_qbittorrent,
+        "plex": check_plex, "navidrome": check_navidrome, "netronome": check_netronome, "emby": check_emby,
+        "lounge": check_lounge, "jellyfin": check_jellyfin, "ombi": check_ombi,
+        "qbittorrent": check_qbittorrent, "rtorrent": check_rtorrent, "rutorrent": check_rutorrent,
+        "flood": check_flood, "transmission": check_transmission, "qui": check_qui,
     }
-    for a in ("sonarr", "radarr", "prowlarr"):
+    for a in ("sonarr", "radarr", "prowlarr", "lidarr"):
         if isinstance(arr.get(a), dict):
             checks[a] = (lambda a=a: check_arr(a, arr[a]))
     now = int(time.time())
@@ -221,6 +331,8 @@ def main():
         try:
             d = fn()
             if not d.get("installed"):
+                if app in USER_UPDATED:
+                    continue
                 raise RuntimeError("couldn't read the installed version")
             avail = d.pop("available_override", None)
             if avail is None:
