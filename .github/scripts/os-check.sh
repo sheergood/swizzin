@@ -16,9 +16,11 @@ logs=/root/os-check-logs
 user=ci
 pass='Ci-Pass-1234567890'
 failed=0
-apps=${APPS:-autobrr filebrowser prowlarr radarr sonarr qbittorrent plex}
+apps=${APPS:-autobrr deluge filebrowser fbquantum jellyfin prowlarr qbittorrent radarr sonarr letsencrypt}
 # answers the installers would otherwise ask for
 export QBITTORRENT_VERSION=latest DELUGE_VERSION=2.1.x RTORRENT_VERSION=0.15.5 TRANSMISSION_VERSION=Repo SKIPCRACKLIB=true
+# Let's Encrypt: a name with no public DNS, kept out of the default site, plain HTTP check
+export LE_HOSTNAME=os-check.example LE_DEFAULTCONF=no LE_BOOL_CF=no
 
 row() { # step result seconds note   (➖ = not checkable here, doesn't count as a failure)
     printf '| %s | %s | %s | %s |\n' "$1" "$2" "$3" "$4" >> "$out"
@@ -83,6 +85,19 @@ for app in $apps; do
         fi
     done
     app_units[$app]=${units# }
+    if [[ $app == letsencrypt ]]; then
+        # issuing needs a public domain; everything before it must work, and nginx must survive
+        log="$logs/install_letsencrypt.log"
+        if [[ -x /root/.acme.sh/acme.sh ]] && grep -q "Certificate could not be issued" "$log" &&
+            ! grep -qE "Could not upgrade acme.sh|set default certificate authority" "$log" && systemctl is-active -q nginx && nginx -t > /dev/null 2>&1; then
+            row "install: letsencrypt" "➖" "$secs" "acme.sh $(/root/.acme.sh/acme.sh --version 2> /dev/null | tail -n1) set up; issuing a certificate needs a public domain; nginx fine after the failed issue"
+        elif [[ $rc -eq 0 && -f /install/.letsencrypt.lock ]]; then
+            row "install: letsencrypt" "✅" "$secs" ""
+        else
+            row "install: letsencrypt" "❌" "$secs" "exit ${rc}: $(tailnote "$log")"
+        fi
+        continue
+    fi
     if [[ $rc -eq 0 && -f /install/.${app}.lock ]]; then
         row "install: $app" "✅" "$secs" "${units:+services:$units}"
     else
@@ -139,6 +154,22 @@ for app in nginx panel $apps; do
         fi
     done
 done
+# fail2ban: running, with swizzin's web jails
+if systemctl is-active -q fail2ban; then
+    jails=$(fail2ban-client status 2> /dev/null | grep -oP 'Jail list:\s*\K.*')
+    missing=""
+    for j in swizzin-panel swizzin-nginx-auth swizzin-filebrowser swizzin-scan; do
+        [[ $jails == *"$j"* ]] || missing+=" $j"
+    done
+    if [[ -z $missing ]]; then
+        row "fail2ban with swizzin's web jails" "✅" "" "jails: ${jails}"
+    else
+        row "fail2ban with swizzin's web jails" "❌" "" "missing:${missing}; running: ${jails}"
+    fi
+else
+    row "fail2ban with swizzin's web jails" "❌" "" "fail2ban $(systemctl is-active fail2ban 2>&1); $(journalctl -u fail2ban -n 2 --no-pager 2> /dev/null | tail -n1 | clean)"
+    journalctl -u fail2ban -n 60 --no-pager > "$logs/zz_journal_fail2ban.log" 2>&1
+fi
 code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' http://127.0.0.1:8333/login)
 [[ $code == 200 ]] && row "panel answers (127.0.0.1:8333/login)" "✅" "" "HTTP $code" || row "panel answers (127.0.0.1:8333/login)" "❌" "" "HTTP $code"
 # every app with an nginx config: its page must answer (2xx-4xx; 5xx or nothing = broken)

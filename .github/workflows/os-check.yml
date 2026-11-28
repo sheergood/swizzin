@@ -14,7 +14,7 @@ on:
     inputs:
       apps:
         description: "Apps to install (space separated)"
-        default: "autobrr filebrowser prowlarr radarr sonarr qbittorrent plex"
+        default: "autobrr deluge filebrowser fbquantum jellyfin prowlarr qbittorrent radarr sonarr letsencrypt"
         type: string
   workflow_call:
     inputs:
