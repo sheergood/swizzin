@@ -43,6 +43,7 @@ if [[ ! -f /etc/systemd/system/swizzin-updates.service ]]; then
     made_unit=1
 fi
 U=/var/lib/swizzin/upgrades
+mkdir -p "$U"
 
 cat > /usr/sbin/systemctl << EOF
 #!/bin/bash
