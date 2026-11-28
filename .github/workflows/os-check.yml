@@ -45,6 +45,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
+      - name: room on the test machine (compiling Deluge and qBittorrent needs several GB)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune -af > /dev/null
+          df -h /
       - name: Debian ${{ matrix.release }} container with systemd
         run: |
           set -e
@@ -68,8 +73,9 @@ jobs:
             sleep 2
           done
           docker exec swz bash -c '. /etc/os-release; echo "$PRETTY_NAME"'
-          # Plex's package skips creating its service when it sees Docker; look like a normal server
-          docker exec swz rm -f /.dockerenv
+          # look like a normal server: Plex's package skips its service when it sees Docker, and the
+          # Debian image's policy-rc.d stops packages (fail2ban, ...) from starting their services
+          docker exec swz rm -f /.dockerenv /usr/sbin/policy-rc.d
           docker cp "$GITHUB_WORKSPACE" swz:/root/swizzin
           docker exec swz chown -R root:root /root/swizzin
       - name: install, upgrade and check (qBittorrent and other clients are compiled)
