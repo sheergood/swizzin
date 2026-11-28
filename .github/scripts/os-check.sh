@@ -115,12 +115,19 @@ unit_of() {
     esac
 }
 for app in nginx panel ${APPS:-autobrr filebrowser prowlarr radarr sonarr qbittorrent plex}; do
-    [[ -f /install/.${app}.lock ]] || continue
     u=$(unit_of "$app")
+    # also apps whose install stopped half-way, if their service exists
+    [[ -f /install/.${app}.lock || -f /etc/systemd/system/${u}.service || -f /etc/systemd/system/${u%@*}@.service ]] || continue
     if systemctl is-active -q "$u"; then
         row "running: $u" "✅" "" ""
     else
         row "running: $u" "❌" "" "$(systemctl is-active "$u" 2>&1); $(journalctl -u "$u" -n 3 --no-pager 2> /dev/null | tail -n1 | sed 's/|/\\|/g' | cut -c1-140)"
+        # why: the unit's own output, kept with the other logs
+        {
+            systemctl status "$u" --no-pager -l 2>&1 | head -n 30
+            journalctl -u "$u" -n 80 --no-pager 2>&1
+            [[ -f /etc/systemd/system/${u}.service ]] && cat "/etc/systemd/system/${u}.service"
+        } > "/root/os-check-logs/zz_journal_${u}.log"
     fi
 done
 code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' http://127.0.0.1:8333/login)
