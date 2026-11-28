@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+# swizzin panel — app update check (root, standard library only)
+# Run every 6 hours by swizzin-updates.timer and on demand ("Check now" in the panel starts
+# swizzin-updates.service). For each installed app it compares the installed version with the newest
+# release and writes /var/lib/swizzin/updates.json (root:swizzin 0640) for the dashboard:
+#
+#   autobrr, Filebrowser, FileBrowser Quantum   GitHub releases             updated by `box upgrade` (panel-upgrade)
+#   Plex                                        Plex's apt repository       apt upgrade of plexmediaserver only
+#   Sonarr, Radarr, Prowlarr                    the app's own updater API   the app updates itself
+#   qBittorrent                                 GitHub tags                 shown only; built from source over SSH
+#
+# Release notes are cut to a sensible size. Nothing here installs anything. A failed check keeps the
+# previous answer for that app and records why, so one unreachable source never blanks the card.
+# Part of the sheergood/swizzin fork. Licensed under GNU GPL v3.
+import grp
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+
+OUT = "/var/lib/swizzin/updates.json"
+ARR = "/var/lib/swizzin/arr.json"
+PANEL_GROUP = "swizzin"
+UA = "swizzin-panel-updates (+https://github.com/sheergood/swizzin)"
+NOTES_MAX = 4000          # characters of release notes kept per app
+CHANGES_MAX = 40          # lines of *arr change lists kept
+VER = re.compile(r"v?(\d+(?:\.\d+){1,3})")
+
+
+def run(cmd, timeout=20):
+    # an empty scratch directory as cwd, so no program can leave a stray database or config behind
+    try:
+        with tempfile.TemporaryDirectory(prefix="swz-upd-") as cwd:
+            p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                               timeout=timeout, universal_newlines=True, cwd=cwd)
+            return p.returncode, p.stdout or ""
+    except (OSError, subprocess.SubprocessError):
+        return 127, ""
+
+
+def first_version(text):
+    m = VER.search(text or "")
+    return m.group(1) if m else None
+
+
+def vtuple(v):
+    return tuple(int(x) for x in re.findall(r"\d+", v or "")[:4]) or (0,)
+
+
+def http_json(url, headers=None, timeout=15, data=None):
+    h = {"User-Agent": UA, "Accept": "application/json"}
+    h.update(headers or {})
+    req = urllib.request.Request(url, headers=h, data=data)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8", "replace"))
+
+
+def gh(path):
+    try:
+        return http_json("https://api.github.com/" + path)
+    except urllib.error.HTTPError as e:
+        if e.code in (403, 429):
+            raise RuntimeError("GitHub is limiting release checks from this server right now (HTTP {})".format(e.code))
+        raise RuntimeError("GitHub answered HTTP {}".format(e.code))
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise RuntimeError("couldn't reach GitHub ({})".format(getattr(e, "reason", e)))
+
+
+def trim_notes(text):
+    text = re.sub(r"<!--.*?-->", "", text or "", flags=re.S).replace("\r", "").strip()
+    if len(text) > NOTES_MAX:
+        cut = text[:NOTES_MAX]
+        text = cut[:cut.rfind("\n")] if "\n" in cut[NOTES_MAX // 2:] else cut
+        text += "\n…"
+    return text
+
+
+def master_user():
+    try:
+        with open("/root/.master.info") as f:
+            return f.read().split(":", 1)[0].strip() or None
+    except OSError:
+        return None
+
+
+def installed(app):
+    return os.path.exists("/install/.{}.lock".format(app))
+
+
+# --------------------------------------------------------------------------- per app
+def gh_release(repo):
+    r = gh("repos/{}/releases/latest".format(repo))
+    return {"latest": first_version(r.get("tag_name")), "notes": trim_notes(r.get("body")),
+            "url": r.get("html_url"), "released": r.get("published_at")}
+
+
+def check_autobrr():
+    cur = None
+    for exe in ("/usr/bin/autobrrctl", "/usr/local/bin/autobrrctl"):
+        if os.path.exists(exe):
+            out = run([exe, "version"])[1]
+            m = re.search(r"Version:?\s*v?(\d+(?:\.\d+){1,3})", out)
+            cur = m.group(1) if m else first_version(out)
+            break
+    d = gh_release("autobrr/autobrr")
+    d.update(installed=cur, method="box")
+    return d
+
+
+def check_filebrowser():
+    user = master_user()
+    exe = "/home/{}/bin/filebrowser".format(user) if user else None
+    cur = first_version(run([exe, "version"])[1]) if exe and os.path.exists(exe) else None
+    d = gh_release("filebrowser/filebrowser")
+    d.update(installed=cur, method="box")
+    return d
+
+
+def check_fbquantum():
+    exe = "/opt/fbquantum/filebrowser"
+    cur = None
+    if os.path.exists(exe):
+        m = re.search(r"Version\s*[:=]?\s*v?([\d.]+(?:-stable)?)", run([exe, "version"])[1])
+        cur = m.group(1) if m else None
+    rel = [r for r in gh("repos/gtsteffaniak/filebrowser/releases?per_page=40")
+           if str(r.get("tag_name", "")).endswith("-stable") and not r.get("draft")]
+    if not rel:
+        raise RuntimeError("no stable FileBrowser Quantum release found")
+    r = rel[0]
+    return {"installed": first_version(cur) if cur else None, "latest": first_version(r["tag_name"]), "notes": trim_notes(r.get("body")),
+            "url": r.get("html_url"), "released": r.get("published_at"), "method": "box"}
+
+
+def check_plex():
+    rc, cur = run(["dpkg-query", "-W", "-f=${Version}", "plexmediaserver"])
+    if rc != 0:
+        raise RuntimeError("plexmediaserver isn't installed as a package")
+    lst = "/etc/apt/sources.list.d/plexmediaserver.list"
+    if os.path.exists(lst):   # refresh Plex's own repository only; nothing else changes
+        run(["apt-get", "update", "-qq", "-o", "Dir::Etc::sourcelist=" + lst, "-o", "Dir::Etc::sourceparts=-",
+             "-o", "APT::Get::List-Cleanup=0"], timeout=120)
+    cand = re.search(r"Candidate:\s*(\S+)", run(["apt-cache", "policy", "plexmediaserver"])[1])
+    latest = cand.group(1) if cand and cand.group(1) != "(none)" else cur
+    short = lambda v: ".".join(re.findall(r"\d+", v)[:4])
+    return {"installed": short(cur), "latest": short(latest), "notes": "",
+            "url": "https://forums.plex.tv/t/plex-media-server/30447", "method": "apt",
+            "available_override": run(["dpkg", "--compare-versions", cur, "lt", latest])[0] == 0}
+
+
+def check_qbittorrent():
+    rc, out = run(["runuser", "-u", "nobody", "--", "qbittorrent-nox", "--version"])
+    cur = first_version(out) if rc == 0 else None
+    tags = gh("repos/qbittorrent/qBittorrent/tags?per_page=100")
+    stable = [first_version(t.get("name")) for t in tags
+              if re.match(r"^release-\d+\.\d+\.\d+$", str(t.get("name", "")))]
+    stable = [v for v in stable if v]
+    if not stable:
+        raise RuntimeError("no qBittorrent release tags found")
+    latest = max(stable, key=vtuple)
+    return {"installed": cur, "latest": latest, "notes": "", "method": "ssh",
+            "url": "https://www.qbittorrent.org/news"}
+
+
+def check_arr(app, conf):
+    """Sonarr/Radarr (API v3) and Prowlarr (v1): ask the app itself; it also says whether it can update itself."""
+    v = "v1" if app == "prowlarr" else "v3"
+    h = {"X-Api-Key": conf["key"]}
+    try:
+        status = http_json("{}/api/{}/system/status".format(conf["url"], v), h, timeout=10)
+        ups = http_json("{}/api/{}/update".format(conf["url"], v), h, timeout=20)
+    except urllib.error.HTTPError as e:
+        raise RuntimeError("{} answered HTTP {}".format(app, e.code))
+    except (urllib.error.URLError, OSError, ValueError):
+        raise RuntimeError("{} isn't answering".format(app))
+    cur = status.get("version")
+    new = [u for u in ups if isinstance(u, dict) and vtuple(u.get("version")) > vtuple(cur)] if isinstance(ups, list) else []
+    best = max(new, key=lambda u: vtuple(u.get("version"))) if new else None
+    lines = []
+    for u in sorted(new, key=lambda u: vtuple(u.get("version")), reverse=True):
+        ch = u.get("changes") or {}
+        for kind, label in (("new", "New"), ("fixed", "Fixed")):
+            for item in ch.get(kind) or []:
+                lines.append("{} · {}: {}".format(u.get("version"), label, str(item).strip()))
+    notes = "\n".join(lines[:CHANGES_MAX]) + ("\n…" if len(lines) > CHANGES_MAX else "")
+    return {"installed": cur, "latest": best["version"] if best else cur, "notes": trim_notes(notes),
+            "method": "self" if (best or {}).get("installable", True) else "self-blocked",
+            "url": {"sonarr": "https://github.com/Sonarr/Sonarr/releases", "radarr": "https://github.com/Radarr/Radarr/releases",
+                    "prowlarr": "https://github.com/Prowlarr/Prowlarr/releases"}[app],
+            "branch": (best or {}).get("branch")}
+
+
+def main():
+    try:
+        with open(OUT) as f:
+            prev = json.load(f)
+    except (OSError, ValueError):
+        prev = {}
+    prev_apps = prev.get("apps") if isinstance(prev.get("apps"), dict) else {}
+    try:
+        with open(ARR) as f:
+            arr = json.load(f)
+    except (OSError, ValueError):
+        arr = {}
+    checks = {
+        "autobrr": check_autobrr, "filebrowser": check_filebrowser, "fbquantum": check_fbquantum,
+        "plex": check_plex, "qbittorrent": check_qbittorrent,
+    }
+    for a in ("sonarr", "radarr", "prowlarr"):
+        if isinstance(arr.get(a), dict):
+            checks[a] = (lambda a=a: check_arr(a, arr[a]))
+    now = int(time.time())
+    apps = {}
+    for app, fn in checks.items():
+        if not installed(app):
+            continue
+        try:
+            d = fn()
+            if not d.get("installed"):
+                raise RuntimeError("couldn't read the installed version")
+            avail = d.pop("available_override", None)
+            if avail is None:
+                avail = bool(d.get("installed") and d.get("latest") and vtuple(d["latest"]) > vtuple(d["installed"]))
+            d.update(available=avail, checked=now, error=None)
+            apps[app] = d
+        except Exception as e:  # noqa: BLE001 - keep the last good answer, say what went wrong
+            old = prev_apps.get(app) if isinstance(prev_apps.get(app), dict) else {}
+            apps[app] = dict(old, error=str(e)[:200], error_at=now)
+    body = json.dumps({"checked": now, "apps": apps}, sort_keys=True)
+    try:
+        gid = grp.getgrnam(PANEL_GROUP).gr_gid
+    except KeyError:
+        gid = None
+    os.makedirs(os.path.dirname(OUT), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(OUT), prefix=".updates.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(body)
+        os.chmod(tmp, 0o640)
+        if gid is not None:
+            os.chown(tmp, 0, gid)
+        os.replace(tmp, OUT)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

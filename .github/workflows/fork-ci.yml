@@ -32,8 +32,23 @@ jobs:
             scripts/install/panel.sh scripts/update/panel.sh scripts/upgrade/panel.sh scripts/remove/panel.sh setup.sh \
             sources/functions/fbquantum scripts/install/fbquantum.sh scripts/upgrade/fbquantum.sh \
             scripts/remove/fbquantum.sh scripts/nginx/fbquantum.sh
+      - name: shellcheck the panel's update scripts (warnings too)
+        run: shellcheck -S warning -x scripts/panel-upgrade scripts/panel-upgrade-run
       - name: python collectors
-        run: python3 -m py_compile scripts/panel-f2b-collect scripts/panel-host-collect
+        run: python3 -m py_compile scripts/panel-f2b-collect scripts/panel-host-collect scripts/panel-updates-check
+      - name: update check (all sources faked)
+        run: python3 .github/scripts/test-panel-updates.py
+      - name: panel-upgrade refuses anything outside its list
+        run: |
+          set -u
+          for a in qbittorrent sonarr 'autobrr;id' '../x' '' check2; do
+            rc=0; sudo scripts/panel-upgrade "$a" > /dev/null 2>&1 || rc=$?
+            [[ $rc -eq 2 ]] || { echo "::error::panel-upgrade '$a' exited $rc, expected 2"; exit 1; }
+          done
+          rc=0; sudo scripts/panel-upgrade autobrr extra > /dev/null 2>&1 || rc=$?
+          [[ $rc -eq 2 ]] || { echo "::error::two arguments exited $rc"; exit 1; }
+          rc=0; sudo scripts/panel-upgrade autobrr > /dev/null 2>&1 || rc=$?
+          [[ $rc -eq 3 ]] || { echo "::error::not-installed app exited $rc, expected 3"; exit 1; }
       - name: no dangling helper references
         run: |
           missing=0

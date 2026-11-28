@@ -1,5 +1,49 @@
 # Changelog
 
+## [sheergood-11] (Nov 28 2026)
+
+### Added
+- **App updates for the panel.** `panel-updates-check` (root) runs every 6 hours from
+  `swizzin-updates.timer`, and when you press **Check now** in the panel. It compares each
+  installed app with its newest release and writes `/var/lib/swizzin/updates.json`
+  (root:swizzin 0640), with release notes cut to about 4000 characters. Sources:
+  - autobrr, Filebrowser, FileBrowser Quantum: GitHub releases.
+  - Plex: Plex's own apt repository. Only that list is refreshed; no other apt source is touched.
+  - Sonarr, Radarr, Prowlarr: the app's own update API.
+  - qBittorrent: GitHub tags (stable `release-x.y.z` only).
+
+  The check installs nothing. A failed lookup, such as GitHub's hourly limit or an app being
+  down, keeps the last good answer for that app and records why.
+- **`panel-upgrade`**: the only upgrade command the panel may run through sudo.
+  - It accepts `check` or one of `autobrr`, `filebrowser`, `fbquantum` and `plex`, and only an
+    installed one.
+  - It refuses while another upgrade or any `box` command is running.
+  - It starts the work as a separate systemd job (`swizzin-upgrade-<app>`), so the upgrade
+    finishes even if the panel restarts.
+- **What that job (`panel-upgrade-run`) does:**
+  - It runs the app's own swizzin upgrade script directly, not `box upgrade`, which would first
+    run a full `box update`. For Plex it runs `apt-get install --only-upgrade plexmediaserver`,
+    keeping your config files.
+  - It keeps the previous program file and checks that every service that was running before
+    is running again 8 s later. If one isn't, it puts the previous version back and restarts it.
+  - Progress and output go to `/var/lib/swizzin/upgrades/<app>.json` and `.log` (root:swizzin
+    0640). The log keeps the last 400 lines with colour codes removed.
+  - If the job is killed part-way, it is marked failed rather than left "running".
+  - When it ends, it re-runs the update check.
+- Sonarr, Radarr and Prowlarr update themselves through their own API, with no root step.
+  qBittorrent is never upgraded by these scripts.
+- `panel-host-collect` also shares Prowlarr's local address and API key in `arr.json`.
+- `panel_sudoers` adds `panel-upgrade` only when the installed panel uses it
+  (`core/updates.py`). The file is still validated with `visudo` before it replaces the current
+  one.
+- `box update` installs the timer on servers that don't have it yet, and removing the panel
+  removes the timer, `updates.json` and the upgrade logs.
+- CI:
+  - shellcheck (warnings too) on the new scripts.
+  - Tests for the update check with every source faked.
+  - Checks that `panel-upgrade` refuses anything outside its list, including qBittorrent,
+    Sonarr, `autobrr;id`, `../x`, an empty name and two arguments.
+
 ## [sheergood-10] (Nov 28 2026)
 
 ### Fixed

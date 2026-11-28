@@ -1,0 +1,126 @@
+#!/bin/bash
+# Runs one app upgrade for the panel, as root, inside its own systemd job (started by panel-upgrade;
+# not callable through sudo). It runs that app's own swizzin upgrade script directly (not
+# `box upgrade`, which would first run a full `box update`), or for Plex an apt upgrade of the
+# plexmediaserver package alone. Progress goes to /var/lib/swizzin/upgrades/<app>.json and the
+# output to <app>.log (root:swizzin 0640, last 400 lines kept). The previous program file is kept
+# until the app's services are confirmed running again, and put back if they aren't.
+set -uo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin
+export DEBIAN_FRONTEND=noninteractive TERM=xterm HOME=/root
+
+app=${1:-}
+case "$app" in autobrr | filebrowser | fbquantum | plex) ;; *) exit 2 ;; esac
+dir=/var/lib/swizzin/upgrades
+mkdir -p "$dir"
+chmod 0750 "$dir"
+chgrp swizzin "$dir" 2> /dev/null || true
+state="${dir}/${app}.json"
+log="${dir}/${app}.log"
+started=$(date +%s)
+finished_ok=""
+
+write_state() { # state message
+    local tmp end=null
+    [[ $1 == running ]] || end=$(date +%s)
+    tmp=$(mktemp "${dir}/.state.XXXXXX") || return 0
+    printf '{"app":"%s","state":"%s","message":"%s","started":%s,"finished":%s}\n' \
+        "$app" "$1" "${2//\"/\'}" "$started" "$end" > "$tmp"
+    chgrp swizzin "$tmp" 2> /dev/null || true
+    chmod 0640 "$tmp"
+    mv -f "$tmp" "$state"
+}
+say() { echo "== $*" >> "$log"; }
+trim_log() { # last 400 lines, colour codes removed
+    tail -n 400 "$log" | sed -E 's/\x1b\[[0-9;?]*[A-Za-z]//g; s/\x1b\(B//g; s/\r$//' > "${log}.tmp" 2> /dev/null &&
+        cat "${log}.tmp" > "$log"
+    rm -f "${log}.tmp"
+}
+finish() { # state message
+    finished_ok=1
+    say "$2"
+    trim_log
+    write_state "$1" "$2"
+    /usr/bin/python3 /etc/swizzin/scripts/panel-updates-check > /dev/null 2>&1 || true # cards show the new version
+    exit 0
+}
+# if anything kills this job part-way (timeout, reboot handling), never leave the card stuck on "running"
+trap '[[ -n $finished_ok ]] || { say "The upgrade was interrupted"; trim_log; write_state failed "The upgrade was interrupted; see the log"; }' EXIT
+
+: > "$log"
+chgrp swizzin "$log" 2> /dev/null || true
+chmod 0640 "$log"
+
+master=$(cut -d: -f1 < /root/.master.info 2> /dev/null || true)
+bins=()
+units=()
+case "$app" in
+    autobrr)
+        bins=(/usr/bin/autobrr /usr/bin/autobrrctl)
+        users=()
+        mapfile -t users < <(find /root/ -maxdepth 1 -name '*.info' -exec cut -d: -f1 {} \; 2> /dev/null | sort -u)
+        for u in "${users[@]}"; do
+            if [[ -n $u ]] && systemctl is-active -q "autobrr@${u}" 2> /dev/null; then units+=("autobrr@${u}"); fi
+        done
+        ;;
+    filebrowser)
+        [[ -n $master ]] && bins=("/home/${master}/bin/filebrowser")
+        if systemctl is-active -q filebrowser 2> /dev/null; then units+=(filebrowser); fi
+        ;;
+    plex)
+        if systemctl is-active -q plexmediaserver 2> /dev/null; then units+=(plexmediaserver); fi
+        ;;
+    *) ;; # fbquantum: its own upgrade script backs up, health-checks and rolls back
+esac
+
+write_state running "Upgrading ${app}"
+say "Upgrading ${app} ($(date -u '+%Y-%m-%d %H:%M UTC'))"
+for b in "${bins[@]}"; do
+    if [[ -f $b ]]; then cp -p "$b" "${b}.panel-prev"; fi
+done
+
+if [[ $app == plex ]]; then
+    lst=/etc/apt/sources.list.d/plexmediaserver.list
+    if [[ -f $lst ]]; then
+        apt-get update -q -o Dir::Etc::sourcelist="$lst" -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 >> "$log" 2>&1
+    fi
+    apt-get install -y -q --only-upgrade -o DPkg::Lock::Timeout=300 -o Dpkg::Options::=--force-confold \
+        plexmediaserver >> "$log" 2>&1 < /dev/null
+    rc=$?
+else
+    # the same environment box gives its upgrade scripts, without box's full self-update first
+    bash -c '. /etc/swizzin/sources/globals.sh && exec bash "/usr/local/bin/swizzin/upgrade/$1.sh"' _ "$app" >> "$log" 2>&1 < /dev/null
+    rc=$?
+fi
+say "Upgrade step finished (exit ${rc})"
+
+# give services a moment, then make sure everything that was running before is running again
+healthy=true
+if ((${#units[@]})); then
+    sleep 8
+    for u in "${units[@]}"; do
+        if ! systemctl is-active -q "$u" 2> /dev/null; then
+            healthy=false
+            say "$u did not come back up"
+        fi
+    done
+fi
+
+if [[ $rc -eq 0 && $healthy == true ]]; then
+    for b in "${bins[@]}"; do rm -f "${b}.panel-prev"; done
+    finish "done" "${app} upgraded"
+fi
+
+restored=false
+for b in "${bins[@]}"; do
+    if [[ -f ${b}.panel-prev ]]; then
+        mv -f "${b}.panel-prev" "$b"
+        restored=true
+    fi
+done
+if [[ $restored == true ]]; then
+    say "Restoring the previous version"
+    for u in "${units[@]}"; do systemctl restart "$u" >> "$log" 2>&1 || true; done
+    finish failed "The upgrade failed and the previous version was restored"
+fi
+finish failed "The upgrade failed (exit ${rc}); see the log"

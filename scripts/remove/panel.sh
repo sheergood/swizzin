@@ -15,4 +15,5 @@ rm /etc/cron.d/set_interface > /dev/null 2>&1
 panel_smart_remove
 panel_f2b_remove
 panel_host_remove
+panel_updates_remove
 rm /install/.panel.lock

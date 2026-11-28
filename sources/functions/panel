@@ -124,6 +124,52 @@ function panel_host_remove() {
     systemctl daemon-reload
 }
 
+# App update check for the panel: every 6 hours (and on "Check now") panel-updates-check compares
+# installed versions with the newest releases and writes /var/lib/swizzin/updates.json. Upgrades
+# started from the panel go through panel-upgrade (see panel_sudoers). Checking installs nothing.
+function panel_updates_setup() {
+    mkdir -p /var/lib/swizzin
+    cat > /etc/systemd/system/swizzin-updates.service << 'EOSVC'
+[Unit]
+Description=swizzin panel app update check
+Documentation=https://github.com/sheergood/swizzin
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Nice=10
+TimeoutStartSec=300
+ExecStart=/usr/bin/python3 /etc/swizzin/scripts/panel-updates-check
+EOSVC
+
+    cat > /etc/systemd/system/swizzin-updates.timer << 'EOTMR'
+[Unit]
+Description=Check for app updates for the swizzin panel every 6 hours
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+RandomizedDelaySec=10min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOTMR
+
+    systemctl daemon-reload
+    systemctl enable -q --now swizzin-updates.timer >> ${log} 2>&1
+    systemctl start --no-block swizzin-updates.service >> ${log} 2>&1 || true
+}
+
+function panel_updates_remove() {
+    systemctl disable -q --now swizzin-updates.timer > /dev/null 2>&1
+    rm -f /etc/systemd/system/swizzin-updates.service /etc/systemd/system/swizzin-updates.timer \
+        /var/lib/swizzin/updates.json
+    rm -rf /var/lib/swizzin/upgrades
+    systemctl daemon-reload
+}
+
 # Port the panel listens on (swizzin.cfg can override the default 8333).
 function panel_port() {
     local p
@@ -222,11 +268,20 @@ function panel_use_fork_remote() {
 # old for the wrapper keep the old rule so their app buttons don't break; the next update tightens it.
 # The file is checked with visudo before it replaces the current one, so sudo can never be broken.
 panel_sudoers() {
-    local wrapper=/etc/swizzin/scripts/panel-systemctl tmp
+    local wrapper=/etc/swizzin/scripts/panel-systemctl upgrade=/etc/swizzin/scripts/panel-upgrade tmp upg="" upg_alias=""
     tmp=$(mktemp /etc/sudoers.d/.panel.XXXXXX) || return 1
     if [[ -f $wrapper ]] && grep -q "panel-systemctl" /opt/swizzin/core/util.py 2> /dev/null; then
         chown root:root "$wrapper"
         chmod 755 "$wrapper"
+        # app upgrades from the panel: only through panel-upgrade (fixed list of apps), and only once
+        # the installed panel knows how to use it
+        if [[ -f $upgrade && -f /etc/swizzin/scripts/panel-upgrade-run ]] &&
+            grep -q "panel-upgrade" /opt/swizzin/core/updates.py 2> /dev/null; then
+            chown root:root "$upgrade" /etc/swizzin/scripts/panel-upgrade-run /etc/swizzin/scripts/panel-updates-check
+            chmod 755 "$upgrade" /etc/swizzin/scripts/panel-upgrade-run /etc/swizzin/scripts/panel-updates-check
+            upg=", PANELUPG"
+            upg_alias="Cmnd_Alias   PANELUPG = $upgrade"
+        fi
         cat > "$tmp" << EOSUD
 # managed by swizzin (panel_sudoers): app control only through the checked wrapper
 Defaults:swizzin !logfile
@@ -235,8 +290,9 @@ Defaults:swizzin !pam_session
 
 Cmnd_Alias   CMNDS = /usr/bin/quota
 Cmnd_Alias   PANELCTL = $wrapper
+${upg_alias}
 
-swizzin     ALL = (root) NOPASSWD: CMNDS, PANELCTL
+swizzin     ALL = (root) NOPASSWD: CMNDS, PANELCTL${upg}
 EOSUD
     else
         cat > "$tmp" << EOSUD

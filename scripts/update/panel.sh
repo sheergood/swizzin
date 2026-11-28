@@ -105,6 +105,12 @@ if [[ -f /install/.panel.lock ]]; then
         echo_progress_done
     fi
 
+    if [[ ! -f /etc/systemd/system/swizzin-updates.timer ]]; then
+        echo_progress_start "Adding app update checks for the panel"
+        (panel_updates_setup) || echo_warn "update check setup failed; the panel won't show app updates"
+        echo_progress_done
+    fi
+
     if ! systemctl is-enabled -q vnstat 2> /dev/null; then
         echo_progress_start "Enabling vnstat for panel traffic stats"
         (panel_vnstat_setup) || echo_warn "vnstat setup failed; transfer stats will be unavailable"
