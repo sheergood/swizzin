@@ -1,5 +1,20 @@
 # Changelog
 
+## [sheergood-15] (Nov 28 2026)
+
+### Fixed
+- **The bare-IP rule (sheergood-14) did nothing on servers set up with Let's Encrypt, while
+  reporting success.**
+  - swizzin's Let's Encrypt setup changes the default site's `server_name _;` to the domain, and
+    the rule only looked for `server_name _;`. The bare IP kept serving the panel login.
+  - The rule now goes after the `server_name` line of every server block in the default site,
+    whatever the name. That file holds the default server, which is where bare-IP requests land.
+  - Success is reported only when every block has the rule; otherwise nothing is changed and it
+    says so.
+  - The scratch copy used while editing lives in /tmp, never in `sites-enabled`, which nginx
+    loads wholesale.
+- CI covers a Let's Encrypt style default site and one where only some blocks have the rule.
+
 ## [sheergood-14] (Nov 28 2026)
 
 ### Added

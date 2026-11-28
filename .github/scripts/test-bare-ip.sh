@@ -48,6 +48,19 @@ for h in 203.0.113.7 203.0.113.7:443 '[2001:db8::7]' '[2001:db8::7]:443'; do exp
 expect example.com http://127.0.0.1:18081 301
 expect 203.0.113.7 http://127.0.0.1:18081 000
 
+# a default site after swizzin's Let's Encrypt setup (server_name is the domain), which the first
+# version of this rule missed, and one that has the include in only one block
+rm -f "$BARE_IP_ALLOW"
+sed -i -E "s|^\s*server_name\s+[^;]+;|  server_name example.com;|" "$t/default"
+grep -vF "$BARE_IP_INCLUDE" "$t/default" > "$t/le" && cat "$t/le" > "$t/default"
+sed -i "0,/server_name example.com;/s||server_name example.com;\n  ${BARE_IP_INCLUDE}|" "$t/default"
+bare_ip_apply
+sleep 1
+[[ $(grep -c "swizzin-no-bare-ip" "$t/default") == 2 ]] || { echo "::error::Let's Encrypt style site: include count $(grep -c swizzin-no-bare-ip "$t/default")"; cat "$t/default"; exit 1; }
+expect other.example.net https://127.0.0.1:18443 200
+expect 203.0.113.7 https://127.0.0.1:18443 000
+expect 203.0.113.7 http://127.0.0.1:18081 000
+
 touch "$BARE_IP_ALLOW"
 bare_ip_apply
 sleep 1   # reload is asynchronous
