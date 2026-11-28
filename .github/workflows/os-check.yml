@@ -53,6 +53,8 @@ jobs:
             sleep 2
           done
           docker exec swz bash -c '. /etc/os-release; echo "$PRETTY_NAME"'
+          # Plex's package skips creating its service when it sees Docker; look like a normal server
+          docker exec swz rm -f /.dockerenv
           docker cp "$GITHUB_WORKSPACE" swz:/root/swizzin
           docker exec swz chown -R root:root /root/swizzin
       - name: install, upgrade and check (several minutes; qBittorrent is compiled)

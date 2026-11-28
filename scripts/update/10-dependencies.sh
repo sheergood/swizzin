@@ -97,6 +97,16 @@ done
 
 apt_install "${dependencies[@]}"
 
+# (sheergood fork) Sonarr, Radarr, Prowlarr and Lidarr (.NET) crash at start without ICU
+# ("Couldn't find a valid ICU package"). Other packages bring it in on Debian 12, but not on
+# Debian 13, so install this release's libicuNN when no version is installed at all.
+if ! dpkg-query -W -f='${db:Status-Status} ${Package}\n' 'libicu[0-9]*' 2> /dev/null | grep -qE '^installed libicu[0-9]+$'; then
+    icu=$(apt-cache search --names-only '^libicu[0-9]+$' 2> /dev/null | awk '{print $1}' | sort -V | tail -n1)
+    if [[ -n $icu ]]; then
+        apt_install "$icu"
+    fi
+fi
+
 #shellcheck source=sources/functions/gcc
 . /etc/swizzin/sources/functions/gcc
 GCC_Jammy_Upgrade

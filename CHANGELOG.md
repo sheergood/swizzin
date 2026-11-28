@@ -1,5 +1,29 @@
 # Changelog
 
+## [sheergood-19] (Nov 28 2026)
+
+Found by the new `os-check` test (real installs in Debian 12 and 13 containers).
+
+### Fixed
+- **Plex's apt repository was retired, which broke `apt update` and so `box update` and every
+  app install.** Plex moved to `https://repo.plex.tv/deb/` with a new signing key
+  (`PlexSign.v2.key`) in Feb 2026. The old `downloads.plex.tv/repo/deb` now answers 404.
+  - New Plex installs use the new repository.
+  - `box update` moves existing servers off the old one (`scripts/update/06-plex-repo.sh`)
+    before it first runs apt. Removed files are backed up to `/root/swizzin/backups/plex-apt/`.
+  - swizzin's own Plex update step used to rewrite any address containing `/deb/` back to the
+    old repository, and Plex's new address contains `/deb/`. That rewrite is gone.
+- **`QBITTORRENT_VERSION=latest` (unattended installs) failed.** It picked qBittorrent 5.3, which
+  the installer refuses ("should be between 4.1 and 5.1"). It now picks the newest version the
+  installer can build (5.1.4 today).
+
+### Debian 13 (Trixie) groundwork
+None of these changes anything on Debian 12, and Trixie is still not on the supported list.
+- `software-properties-common` and `apt-transport-https` are installed only where the release
+  still has them.
+- Sonarr, Radarr, Prowlarr and Lidarr crashed at start on Debian 13 ("Couldn't find a valid ICU
+  package"). The release's `libicuNN` is now installed when no version is present.
+
 ## [sheergood-18] (Nov 28 2026)
 
 ### Added
