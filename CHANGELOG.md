@@ -1,5 +1,30 @@
 # Changelog
 
+## [sheergood-17] (Nov 28 2026)
+
+### Changed
+- **The upstream sync follows a protocol with parameters** (`.github/upstream-sync.conf`,
+  documented in FORK.md, "Upstream updates"). Before, any upstream change that merged and passed
+  CI went to `master` the same week.
+  - **Quarantine:** upstream commits are taken only once they're 7 days old
+    (`QUARANTINE_DAYS`), so the author's own fixes and reverts arrive with them.
+  - **Approval** for risky updates. They're merged and tested but wait for you when they:
+    - change code `box update` runs on every server (`REVIEW_PATHS`);
+    - touch an app you run (`PROTECTED_APPS`);
+    - change a file this fork changed too, even when the merge was clean;
+    - remove an app.
+
+    The issue lists the reasons, the CI result and a one-line approve command. An approval is
+    for one exact upstream commit, which is merged and tested again before it's promoted.
+  - **Rollback point:** each promotion tags the previous `master` as `pre-sync-<date>-<commit>`
+    and the result as `sync-<date>-<commit>`.
+    `SWIZ_GIT_REF=tags/pre-sync-… box update` puts a server back.
+  - The same update waiting for approval is reported once, not every week.
+- CI tests every sync rule on throwaway repositories (`.github/scripts/test-upstream-merge.sh`,
+  14 cases): quarantine, partly-young updates, core, protected-app, overlapping-file and
+  app-removal triggers, conflicts, workflow changes, approval of the exact commit, and refused
+  approvals.
+
 ## [sheergood-16] (Nov 28 2026)
 
 Review of everything the panel can do as root, with fixes.

@@ -78,6 +78,10 @@ jobs:
           [[ $rc -eq 2 ]] || { echo "::error::two arguments exited $rc"; exit 1; }
           rc=0; sudo scripts/panel-upgrade autobrr > /dev/null 2>&1 || rc=$?
           [[ $rc -eq 3 ]] || { echo "::error::not-installed app exited $rc, expected 3"; exit 1; }
+      - name: upstream sync rules (quarantine, approval triggers, conflicts, approvals)
+        run: |
+          shellcheck -S warning .github/scripts/upstream-merge.sh .github/scripts/test-upstream-merge.sh
+          bash .github/scripts/test-upstream-merge.sh
       - name: no dangling helper references
         run: |
           missing=0
