@@ -1,38 +1,73 @@
 #!/bin/bash
 # The only update commands the panel (user swizzin) may run as root:
-#   panel-upgrade check    start the app update check now (returns at once)
-#   panel-upgrade <app>    upgrade one app
-# Accepts autobrr, filebrowser, fbquantum, plex, navidrome, netronome, emby, lounge, jellyfin or ombi
-# (installed ones only), refuses while another upgrade
-# or a box command is running, then starts the upgrade as its own systemd job (panel-upgrade-run), so
-# it finishes even if the panel restarts. Prints "started" and returns at once.
-# Sonarr/Radarr/Prowlarr/Lidarr update themselves through their own API; torrent clients and their
-# web UIs are never upgraded here.
+#   panel-upgrade check                      start the app update check now (returns at once)
+#   panel-upgrade features                   what this server supports (history rollback hold arr)
+#   panel-upgrade <app> [--major] [--by U]   upgrade one app
+#   panel-upgrade rollback <app> [--by U]    go back to the version before its last upgrade
+#   panel-upgrade hold <app> [--by U]        keep the app at its current version
+#   panel-upgrade release <app> [--by U]     offer its updates again
+# Apps: autobrr, filebrowser, fbquantum, plex, navidrome, netronome, emby, lounge, jellyfin, ombi,
+# sonarr, radarr, prowlarr, lidarr (installed ones only). --major lets Sonarr/Radarr/Prowlarr/Lidarr
+# install a new major version (the admin confirmed it). U is the panel user, recorded in the history.
+# Upgrades and rollbacks refuse while another one or a box command is running, then run as their own
+# systemd job (panel-upgrade-run), so they finish even if the panel restarts; "started" is printed and
+# the command returns at once. Torrent clients and their web UIs are never upgraded here.
+# Exit codes: 0 ok, 2 bad request, 3 not installed, 4 busy, 5 held, 6 can't roll back.
 set -euo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+lib=/etc/swizzin/scripts/panel-upgrade-lib
+APPS="autobrr filebrowser fbquantum plex navidrome netronome emby lounge jellyfin ombi sonarr radarr prowlarr lidarr"
 
-app=${1:-}
-if (($# != 1)); then
-    echo "usage: panel-upgrade check | <autobrr|filebrowser|fbquantum|plex|navidrome|netronome|emby|lounge|jellyfin|ombi>" >&2
+usage() {
+    echo "usage: panel-upgrade check | features | [rollback|hold|release] <app> [--major] [--by USER]" >&2
     exit 2
-fi
-if [[ $app == check ]]; then
+}
+if (($# == 1)) && [[ $1 == check ]]; then
     systemctl start --no-block swizzin-updates.service
     echo started
     exit 0
 fi
-case "$app" in
-    autobrr | filebrowser | fbquantum | plex | navidrome | netronome | emby | lounge | jellyfin | ombi) ;;
-    *)
-        echo "panel-upgrade: $app can't be upgraded from the panel" >&2
-        exit 2
+if (($# == 1)) && [[ $1 == features ]]; then
+    echo "history rollback hold arr"
+    exit 0
+fi
+
+action=upgrade app="" major=false by=""
+case "${1:-}" in
+    rollback | hold | release)
+        action=$1
+        shift
         ;;
 esac
+(($# >= 1)) || usage
+app=$1
+shift
+while (($#)); do
+    case "$1" in
+        --major) [[ $action == upgrade ]] && major=true || usage ;;
+        --by)
+            (($# >= 2)) || usage
+            by=$2
+            [[ $by =~ ^[a-z_][a-z0-9_.-]{0,31}$ ]] || usage
+            shift
+            ;;
+        *) usage ;;
+    esac
+    shift
+done
+if [[ " $APPS " != *" ${app} "* || -z $app ]]; then
+    echo "panel-upgrade: $app can't be upgraded from the panel" >&2
+    exit 2
+fi
 if [[ ! -f /install/.${app}.lock ]]; then
     echo "panel-upgrade: $app isn't installed" >&2
     exit 3
 fi
-# one caller at a time from here to the job being queued, so two quick clicks can't start two upgrades
+L() { /usr/bin/python3 -I "$lib" "$@"; }
+byarg=()
+[[ -n $by ]] && byarg=(--by "$by")
+
+# one caller at a time from here to the job being queued, so two quick clicks can't start two jobs
 exec 9> /run/swizzin-panel-upgrade.lock
 if ! flock -w 10 9; then
     echo "panel-upgrade: another upgrade is starting" >&2
@@ -43,10 +78,44 @@ if [[ $running == *swizzin-upgrade-* ]]; then
     echo "panel-upgrade: another upgrade is running" >&2
     exit 4
 fi
+
+case "$action" in
+    hold)
+        L hold "$app" "${byarg[@]}"
+        echo held
+        exit 0
+        ;;
+    release)
+        L release "$app" "${byarg[@]}" || true
+        echo released
+        exit 0
+        ;;
+esac
+
 if pgrep -f '/usr/local/bin/box( |$)' > /dev/null 2>&1; then
     echo "panel-upgrade: a box command is running on the server; try again when it's done" >&2
     exit 4
 fi
-systemd-run --unit="swizzin-upgrade-${app}" --description="swizzin panel: upgrade ${app}" --collect --quiet \
-    -p TimeoutStartSec=3600 -p Type=oneshot --no-block /etc/swizzin/scripts/panel-upgrade-run "$app"
+run=(/etc/swizzin/scripts/panel-upgrade-run)
+if [[ $action == rollback ]]; then
+    if ! L can-rollback "$app"; then
+        echo "panel-upgrade: $app can't be rolled back from the panel" >&2
+        exit 6
+    fi
+    if ! err=$(L snap-check "$app" 2>&1 > /dev/null); then
+        echo "panel-upgrade: ${err:-there is nothing to roll back to}" >&2
+        exit 6
+    fi
+    run+=(--rollback "$app")
+else
+    if held=$(L held "$app" 2> /dev/null); then
+        echo "panel-upgrade: $app is held at ${held:-its version}; release it first" >&2
+        exit 5
+    fi
+    run+=("$app")
+    [[ $major == true ]] && run+=(--major)
+fi
+run+=("${byarg[@]}")
+systemd-run --unit="swizzin-upgrade-${app}" --description="swizzin panel: ${action} ${app}" --collect --quiet \
+    -p TimeoutStartSec=3600 -p Type=oneshot --no-block "${run[@]}"
 echo started

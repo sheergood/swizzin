@@ -413,6 +413,10 @@ panel_sudoers() {
             grep -q "panel-upgrade" /opt/swizzin/core/updates.py 2> /dev/null; then
             chown root:root "$upgrade" /etc/swizzin/scripts/panel-upgrade-run /etc/swizzin/scripts/panel-updates-check
             chmod 755 "$upgrade" /etc/swizzin/scripts/panel-upgrade-run /etc/swizzin/scripts/panel-updates-check
+            if [[ -f /etc/swizzin/scripts/panel-upgrade-lib ]]; then
+                chown root:root /etc/swizzin/scripts/panel-upgrade-lib
+                chmod 755 /etc/swizzin/scripts/panel-upgrade-lib
+            fi
             upg=", PANELUPG"
             upg_alias="Cmnd_Alias   PANELUPG = $upgrade"
         fi

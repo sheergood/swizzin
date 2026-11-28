@@ -1,23 +1,49 @@
 #!/bin/bash
-# Runs one app upgrade for the panel, as root, inside its own systemd job (started by panel-upgrade;
-# not callable through sudo). It runs that app's own swizzin upgrade script directly (not
-# `box upgrade`, which would first run a full `box update`), or for apt apps an upgrade of that
-# app's packages alone. Progress goes to /var/lib/swizzin/upgrades/<app>.json and the output to
-# <app>.log (root:swizzin 0640, last 400 lines kept).
+# Runs one app upgrade or rollback for the panel, as root, inside its own systemd job (started by
+# panel-upgrade; not callable through sudo):
+#   panel-upgrade-run <app> [--major] [--by USER]      upgrade
+#   panel-upgrade-run --rollback <app> [--by USER]     go back to the version before the last upgrade
+# Progress goes to /var/lib/swizzin/upgrades/<app>.json and the output to <app>.log (root:swizzin 0640,
+# last 400 lines kept); every finished job adds an entry to the update history (panel-upgrade-lib).
 #
-# Apps with a single program file (autobrr, Filebrowser, Navidrome, Netronome) are stopped first, so
-# their program and their database can be copied in a consistent state. If they don't come back up
-# afterwards, both are put back together: a new version may already have changed the database, and
-# the old program must get the old database. Package apps (Plex, Jellyfin, Ombi, Emby) can't be
-# rolled back, but the job checks the package really changed instead of reporting a quiet no-op as
-# a success.
+# Upgrades run that app's own swizzin upgrade script (not `box upgrade`, which would first run a full
+# `box update`), an upgrade of the app's packages alone for apt apps, or the app's own updater for
+# Sonarr/Radarr/Prowlarr/Lidarr. Before it, a copy of the program and its data is taken with the app
+# stopped (the *arr apps keep running; their database is copied with SQLite's online backup). If the
+# app doesn't come back up, program and data are put back together: a new version may already have
+# changed the database, and the old program must get the old database. After a good upgrade that copy
+# is kept for the Roll back button, until the next upgrade.
+#
+# A rollback first copies the current version (so a rollback that fails can be undone), restores the
+# kept copy, checks the app runs that exact program again, and holds the app at that version.
 set -uo pipefail
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/bin
 export DEBIAN_FRONTEND=noninteractive TERM=xterm HOME=/root
 
-app=${1:-}
-case "$app" in autobrr | filebrowser | fbquantum | plex | navidrome | netronome | emby | lounge | jellyfin | ombi) ;; *) exit 2 ;; esac
-dir=/var/lib/swizzin/upgrades
+APPS="autobrr filebrowser fbquantum plex navidrome netronome emby lounge jellyfin ombi sonarr radarr prowlarr lidarr"
+mode=upgrade major=false by="" app=""
+while (($#)); do
+    case "$1" in
+        --rollback) mode=rollback ;;
+        --major) major=true ;;
+        --by)
+            by=${2:-}
+            shift
+            ;;
+        -*) exit 2 ;;
+        *)
+            [[ -z $app ]] || exit 2
+            app=$1
+            ;;
+    esac
+    shift
+done
+[[ " $APPS " == *" ${app} "* && -n $app ]] || exit 2
+[[ -z $by || $by =~ ^[a-z_][a-z0-9_.-]{0,31}$ ]] || by=""
+lib=${SWZ_UPG_LIB:-/etc/swizzin/scripts/panel-upgrade-lib}
+L() { /usr/bin/python3 -I "$lib" "$@"; }
+
+dir=${SWZ_UPG_DIR:-/var/lib/swizzin/upgrades}
 mkdir -p "$dir"
 chmod 0750 "$dir"
 chgrp swizzin "$dir" 2> /dev/null || true
@@ -25,13 +51,15 @@ state="${dir}/${app}.json"
 log="${dir}/${app}.log"
 started=$(date +%s)
 finished_ok=""
+phase=""
+units=()
 
 write_state() { # state message
     local tmp end=null
     [[ $1 == running ]] || end=$(date +%s)
     tmp=$(mktemp "${dir}/.state.XXXXXX") || return 0
-    printf '{"app":"%s","state":"%s","message":"%s","started":%s,"finished":%s}\n' \
-        "$app" "$1" "${2//\"/\'}" "$started" "$end" > "$tmp"
+    printf '{"app":"%s","state":"%s","message":"%s","started":%s,"finished":%s,"kind":"%s"}\n' \
+        "$app" "$1" "$(printf '%s' "$2" | tr -d '"\\' | tr '\n\t' '  ')" "$started" "$end" "$mode" > "$tmp"
     chgrp swizzin "$tmp" 2> /dev/null || true
     chmod 0640 "$tmp"
     mv -f "$tmp" "$state"
@@ -42,139 +70,195 @@ trim_log() { # last 400 lines, colour codes removed
         cat "${log}.tmp" > "$log"
     rm -f "${log}.tmp"
 }
-finish() { # state message
-    finished_ok=1
-    say "$2"
-    trim_log
-    write_state "$1" "$2"
+refresh_check() {
     # cards show the new version; through the service so it never runs twice at once
     if [[ -f /etc/systemd/system/swizzin-updates.service ]]; then
         systemctl start swizzin-updates.service > /dev/null 2>&1 || true
     else
         /usr/bin/python3 /etc/swizzin/scripts/panel-updates-check > /dev/null 2>&1 || true
     fi
-    exit 0
 }
-# if anything kills this job part-way (timeout, reboot handling), never leave the card stuck on "running"
-# (and never leave an app stopped: single-program apps are stopped while they're copied)
+record() { # action result from to message
+    L history-add "$app" --action "$1" --result "$2" --from "${3:-}" --to "${4:-}" --by "$by" \
+        --started "$started" --message "$5" --log "$log" > /dev/null 2>> "$log" || say "Couldn't add this to the update history"
+}
+start_units() {
+    for u in "${units[@]}"; do systemctl start "$u" >> "$log" 2>&1 || true; done
+}
+stop_units() {
+    for u in "${units[@]}"; do systemctl stop "$u" >> "$log" 2>&1 || true; done
+}
+units_up() { # every unit that should run is running (after a moment to settle)
+    local u ok=true
+    ((${#units[@]})) || return 0
+    sleep "${SWZ_SETTLE:-8}"
+    for u in "${units[@]}"; do
+        if ! systemctl is-active -q "$u" 2> /dev/null; then
+            ok=false
+            say "$u did not come back up"
+        fi
+    done
+    [[ $ok == true ]]
+}
+# if anything kills this job part-way (timeout, reboot handling), never leave the card stuck on
+# "running", never leave an app stopped, and never leave a rollback half done
 on_exit() {
     [[ -n $finished_ok ]] && return
-    say "The upgrade was interrupted"
-    if ((${#bins[@]})); then
-        for u in "${units[@]}"; do systemctl start "$u" > /dev/null 2>&1 || true; done
+    say "The ${mode} was interrupted"
+    if [[ $phase == restoring ]]; then
+        stop_units
+        L snap-restore "$app" undo >> "$log" 2>&1 || true
     fi
+    start_units
     trim_log
-    write_state failed "The upgrade was interrupted; see the log"
+    write_state failed "The ${mode} was interrupted; see the log"
+    record "$mode" failed "${from:-}" "" "The ${mode} was interrupted"
 }
-bins=()
-units=()
 trap on_exit EXIT
+
+is_arr=false
+case "$app" in sonarr | radarr | prowlarr | lidarr) is_arr=true ;; esac
+from=$(L installed "$app" 2> /dev/null || true)
+# the units to stop and start: those running now (a rollback also starts enabled ones that are down)
+while IFS= read -r u; do
+    [[ -n $u ]] || continue
+    if systemctl is-active -q "$u" 2> /dev/null; then
+        units+=("$u")
+    elif [[ $mode == rollback ]] && systemctl is-enabled -q "$u" 2> /dev/null; then
+        units+=("$u")
+    fi
+done < <(L units "$app" 2> /dev/null)
 
 : > "$log"
 chgrp swizzin "$log" 2> /dev/null || true
 chmod 0640 "$log"
 
+# ------------------------------------------------------------------------------------- rollback
+if [[ $mode == rollback ]]; then
+    write_state running "Rolling back ${app}"
+    say "Rolling back ${app} ($(date -u '+%Y-%m-%d %H:%M UTC'))"
+    if ! pair=$(L snap-check "$app" 2>> "$log"); then
+        reason=$(tail -n1 "$log" | sed 's/^== //')
+        finished_ok=1
+        write_state failed "Can't roll back: ${reason}"
+        record rollback failed "$from" "" "Can't roll back: ${reason}"
+        exit 0
+    fi
+    prev=${pair%%$'\t'*} cur=${pair#*$'\t'}
+    say "Going back from ${cur:-the current version} to ${prev:-the previous version}"
+    stop_units
+    say "Keeping a copy of the current version first"
+    L snap-save "$app" undo >> "$log" 2>&1
+    if [[ $? -ne 0 ]]; then
+        L snap-drop "$app" undo > /dev/null 2>&1
+        start_units
+        finished_ok=1
+        write_state failed "Can't roll back: couldn't keep a full copy of the current version first (see the log)"
+        record rollback failed "$cur" "$prev" "Couldn't keep a full copy of the current version first, so nothing was changed"
+        exit 0
+    fi
+    phase=restoring
+    say "Restoring ${prev}"
+    ok=true
+    L snap-restore "$app" last >> "$log" 2>&1 || ok=false
+    start_units
+    if [[ $ok == true ]] && ! units_up; then ok=false; fi
+    if [[ $ok == true && $is_arr == true ]]; then
+        if v=$(L arr-wait "$app" 2> /dev/null); then say "${app} answers: ${v}"; else
+            say "${app} isn't answering"
+            ok=false
+        fi
+    fi
+    if [[ $ok == true ]] && ! L snap-verify-last "$app" 2>> "$log"; then
+        say "The program running isn't the kept copy"
+        ok=false
+    fi
+    if [[ $ok == true ]]; then
+        phase=""
+        L snap-drop "$app" last > /dev/null 2>&1
+        L snap-drop "$app" undo > /dev/null 2>&1
+        L hold "$app" --version "$prev" --by "$by" --why "Held after rolling back, so it doesn't update straight back" --quiet >> "$log" 2>&1 || true
+        finished_ok=1
+        say "Rolled back to ${prev}"
+        trim_log
+        write_state "done" "Rolled back to ${prev}"
+        record rollback "done" "$cur" "$prev" "Rolled back and held at ${prev}"
+        refresh_check
+        exit 0
+    fi
+    say "The rollback didn't work; putting ${cur} back"
+    stop_units
+    undo_ok=true
+    L snap-restore "$app" undo >> "$log" 2>&1 || undo_ok=false
+    phase=""
+    start_units
+    L snap-drop "$app" undo > /dev/null 2>&1
+    finished_ok=1
+    trim_log
+    if [[ $undo_ok == true ]]; then
+        write_state failed "The rollback didn't work, so ${cur} was put back; see the log"
+        record rollback failed "$cur" "$prev" "The rollback didn't work, so ${cur} was put back"
+    else
+        write_state failed "The rollback didn't work and ${cur} couldn't be fully put back; see the log"
+        record rollback failed "$cur" "$prev" "The rollback didn't work and ${cur} couldn't be fully put back"
+    fi
+    refresh_check
+    exit 0
+fi
+
+# ------------------------------------------------------------------------------------- upgrade
+if held=$(L held "$app" 2> /dev/null); then
+    finished_ok=1
+    write_state failed "${app} is held at ${held}; release it first"
+    exit 0
+fi
 master=$(cut -d: -f1 < /root/.master.info 2> /dev/null || true)
-bins=()
-units=()
-data=()     # files copied with the program and restored with it (databases, configs)
 apt_list=""
 apt_pkgs=()
-pkg=""      # package whose version must change for the upgrade to count
+pkg="" # package whose version must change for the upgrade to count
 case "$app" in
-    autobrr)
-        bins=(/usr/bin/autobrr /usr/bin/autobrrctl)
-        users=()
-        mapfile -t users < <(find /root/ -maxdepth 1 -name '*.info' -exec cut -d: -f1 {} \; 2> /dev/null | sort -u)
-        for u in "${users[@]}"; do
-            if [[ -n $u ]] && systemctl is-active -q "autobrr@${u}" 2> /dev/null; then units+=("autobrr@${u}"); fi
-            [[ -n $u ]] && data+=("/home/${u}/.config/autobrr/autobrr.db" "/home/${u}/.config/autobrr/config.toml")
-        done
-        ;;
-    filebrowser)
-        [[ -n $master ]] && bins=("/home/${master}/bin/filebrowser") data=("/home/${master}/.config/Filebrowser/filebrowser.db")
-        if systemctl is-active -q filebrowser 2> /dev/null; then units+=(filebrowser); fi
-        ;;
-    plex)
-        apt_list=plexmediaserver.list apt_pkgs=(plexmediaserver) pkg=plexmediaserver
-        if systemctl is-active -q plexmediaserver 2> /dev/null; then units+=(plexmediaserver); fi
-        ;;
-    jellyfin)
-        apt_list=jellyfin.list apt_pkgs=(jellyfin jellyfin-server jellyfin-web) pkg=jellyfin-server
-        if systemctl is-active -q jellyfin 2> /dev/null; then units+=(jellyfin); fi
-        ;;
-    ombi)
-        apt_list=ombi.list apt_pkgs=(ombi) pkg=ombi
-        if systemctl is-active -q ombi 2> /dev/null; then units+=(ombi); fi
-        ;;
-    navidrome)
-        bins=(/opt/navidrome/navidrome)
-        if systemctl is-active -q navidrome 2> /dev/null; then units+=(navidrome); fi
-        # its database lives in DataFolder (navidrome.toml), else the service's working directory
-        if [[ -n $master ]]; then
-            nd=$(grep -oP '^\s*DataFolder\s*=\s*"\K[^"]+' "/home/${master}/.config/navidrome/navidrome.toml" 2> /dev/null | head -n1)
-            [[ -n $nd ]] || nd=$(grep -oP '^WorkingDirectory=\K\S+' /etc/systemd/system/navidrome.service 2> /dev/null | head -n1)
-            [[ -n $nd ]] && data=("${nd%/}/navidrome.db" "/home/${master}/.config/navidrome/navidrome.toml")
-        fi
-        ;;
-    netronome)
-        bins=(/usr/bin/netronome)
-        mapfile -t users < <(find /root/ -maxdepth 1 -name '*.info' -exec cut -d: -f1 {} \; 2> /dev/null | sort -u)
-        for u in "${users[@]}"; do
-            if [[ -n $u ]] && systemctl is-active -q "netronome@${u}" 2> /dev/null; then units+=("netronome@${u}"); fi
-            [[ -n $u ]] && data+=("/home/${u}/.config/netronome/netronome.db" "/home/${u}/.config/netronome/config.toml")
-        done
-        ;;
-    emby)
-        pkg=emby-server
-        if systemctl is-active -q emby-server 2> /dev/null; then units+=(emby-server); fi
-        ;;
-    lounge)
-        if systemctl is-active -q lounge 2> /dev/null; then units+=(lounge); fi
-        ;;
-    *) ;; # fbquantum: its own upgrade script backs up, health-checks and rolls back
+    plex) apt_list=plexmediaserver.list apt_pkgs=(plexmediaserver) pkg=plexmediaserver ;;
+    jellyfin) apt_list=jellyfin.list apt_pkgs=(jellyfin jellyfin-server jellyfin-web) pkg=jellyfin-server ;;
+    ombi) apt_list=ombi.list apt_pkgs=(ombi) pkg=ombi ;;
+    emby) pkg=emby-server ;;
 esac
-
+: "$master"
 pkg_version() { dpkg-query -W -f='${Version}' "$1" 2> /dev/null || true; }
-prev="${dir}/${app}.prev"   # copies of the program's data (root only)
 
 write_state running "Upgrading ${app}"
 say "Upgrading ${app} ($(date -u '+%Y-%m-%d %H:%M UTC'))"
 pkg_before=""
 [[ -n $pkg ]] && pkg_before=$(pkg_version "$pkg")
 
-# single-program apps: stop, then copy program + data while nothing writes to them. Their upgrade
-# scripts only try-restart, so the services stay stopped until they're started below.
-if ((${#bins[@]})); then
-    for u in "${units[@]}"; do systemctl stop "$u" >> "$log" 2>&1 || true; done
-    rm -rf "$prev"
-    install -d -m 0700 "$prev"
-    for b in "${bins[@]}"; do
-        if [[ -f $b ]]; then cp -p "$b" "${b}.panel-prev"; fi
-    done
-    need=0
-    for f in "${data[@]}"; do
-        for g in "$f" "$f-wal" "$f-shm"; do
-            [[ -f $g ]] && need=$((need + $(stat -c %s "$g")))
-        done
-    done
-    free=$(($(df --output=avail -B1 "$dir" 2> /dev/null | tail -n1 | tr -d ' ') + 0))
-    if ((need > 0 && free < need * 2 + 104857600)); then
-        say "Not enough free space to copy the app's data (needs $((need / 1048576)) MB); only the program is kept"
-        data=()
-    fi
-    for f in "${data[@]}"; do
-        for g in "$f" "$f-wal" "$f-shm"; do
-            if [[ -f $g ]]; then cp -p --parents "$g" "$prev/"; fi
-        done
-    done
+# a copy of program and data, taken while nothing writes to them (the *arr apps copy their database
+# online). Upgrade scripts only try-restart, so stopped services stay stopped until started below.
+copy=false
+if L can-rollback "$app"; then
+    [[ $is_arr == true ]] || stop_units
+    L snap-save "$app" new >> "$log" 2>&1
+    case $? in
+        0 | 3) copy=true ;;
+        *) say "No copy could be taken; the upgrade goes ahead without one" ;;
+    esac
 fi
 
-if [[ -n $apt_list ]]; then
+arr_msg=""
+to=""
+if [[ $is_arr == true ]]; then
+    args=(arr-update "$app")
+    [[ $major == true ]] && args+=(--major)
+    out=$(L "${args[@]}" 2>> "$log")
+    rc=$?
+    grep -v '^RESULT' <<< "$out" >> "$log"
+    result=$(grep '^RESULT' <<< "$out" | tail -n1)
+    IFS=$'\x1f' read -r _ afrom ato arr_msg <<< "$result"
+    [[ -n ${afrom:-} ]] && from=$afrom
+    to=${ato:-}
+elif [[ -n $apt_list ]]; then
     # only this app's packages, from its own repository; packages that aren't installed are skipped
     lst=/etc/apt/sources.list.d/$apt_list
     if [[ -f $lst ]]; then
-        for try in 1 2 3; do   # another apt run may hold the lists lock for a moment
+        for try in 1 2 3; do # another apt run may hold the lists lock for a moment
             apt-get update -q -o Dir::Etc::sourcelist="$lst" -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0 >> "$log" 2>&1 && break
             say "apt-get update failed (try ${try}); waiting"
             sleep 15
@@ -189,61 +273,84 @@ else
     rc=$?
 fi
 say "Upgrade step finished (exit ${rc})"
-if ((${#bins[@]})); then
-    for u in "${units[@]}"; do systemctl start "$u" >> "$log" 2>&1 || true; done
-fi
+[[ $is_arr == true ]] || start_units
+changed=true
 # package apps: a step that "worked" but left the same version installed isn't an upgrade
-if [[ $rc -eq 0 && -n $pkg ]]; then
+if [[ -n $pkg && $is_arr == false ]]; then
     pkg_after=$(pkg_version "$pkg")
     if [[ -n $pkg_before && $pkg_after == "$pkg_before" ]]; then
-        say "${pkg} is still ${pkg_before}: nothing newer was installed"
-        rc=100
+        changed=false
+        if [[ $rc -eq 0 ]]; then
+            say "${pkg} is still ${pkg_before}: nothing newer was installed"
+            rc=100
+        fi
     fi
 fi
 
-# give services a moment, then make sure everything that was running before is running again
 healthy=true
-if ((${#units[@]})); then
-    sleep 8
-    for u in "${units[@]}"; do
-        if ! systemctl is-active -q "$u" 2> /dev/null; then
-            healthy=false
-            say "$u did not come back up"
-        fi
-    done
-fi
+[[ $is_arr == true ]] || units_up || healthy=false
 
 if [[ $rc -eq 0 && $healthy == true ]]; then
-    for b in "${bins[@]}"; do rm -f "${b}.panel-prev"; done
-    rm -rf "$prev"
-    finish "done" "${app} upgraded"
+    finished_ok=1
+    msg="${app} upgraded"
+    [[ -n $arr_msg ]] && msg=$arr_msg
+    say "$msg"
+    trim_log
+    write_state "done" "$msg"
+    refresh_check
+    [[ -n $to ]] || to=$(L installed "$app" 2> /dev/null || true)
+    if [[ $copy == true ]]; then L snap-keep "$app" --from "$from" --to "$to" >> "$log" 2>&1 || true; fi
+    record upgrade "done" "$from" "$to" "$msg"
+    exit 0
 fi
 
-restored=false
-if ((${#bins[@]})); then
-    for u in "${units[@]}"; do systemctl stop "$u" >> "$log" 2>&1 || true; done
-    for b in "${bins[@]}"; do
-        if [[ -f ${b}.panel-prev ]]; then
-            mv -f "${b}.panel-prev" "$b"
-            restored=true
-        fi
-    done
-    if [[ $restored == true && -d $prev ]]; then
-        # the old program gets its old data back (a newer version may have migrated it)
-        for f in "${data[@]}"; do
-            rm -f "$f-wal" "$f-shm"
-            for g in "$f" "$f-wal" "$f-shm"; do
-                if [[ -f ${prev}${g} ]]; then cp -p "${prev}${g}" "$g"; fi
-            done
-        done
-    fi
-    for u in "${units[@]}"; do systemctl start "$u" >> "$log" 2>&1 || true; done
-fi
-if [[ $restored == true ]]; then
-    say "Restored the previous version and its data"
-    finish failed "The upgrade failed and the previous version was restored"
-fi
+# no change at all: nothing to undo
 if [[ $rc -eq 100 ]]; then
-    finish failed "Nothing newer was installed; see the log"
+    [[ $copy == true ]] && L snap-drop "$app" new > /dev/null 2>&1
+    finished_ok=1
+    msg=${arr_msg:-Nothing newer was installed; see the log}
+    say "$msg"
+    trim_log
+    write_state failed "$msg"
+    record upgrade unchanged "$from" "" "$msg"
+    refresh_check
+    exit 0
 fi
-finish failed "The upgrade failed (exit ${rc}); see the log"
+
+# the *arr apps' own updater rolls itself back when the new version doesn't start
+restore=false
+if [[ $copy == true && $is_arr == false ]]; then
+    restore=true
+    # a package app whose package didn't change and that still runs: nothing to put back
+    [[ -n $pkg && $changed == false && $healthy == true ]] && restore=false
+fi
+if [[ $restore == true ]]; then
+    say "Putting the previous version and its data back"
+    stop_units
+    rok=true
+    L snap-restore "$app" new >> "$log" 2>&1 || rok=false
+    start_units
+    units_up || rok=false
+    L snap-drop "$app" new > /dev/null 2>&1
+    finished_ok=1
+    trim_log
+    if [[ $rok == true ]]; then
+        write_state failed "The upgrade failed and the previous version was restored"
+        record upgrade restored "$from" "" "The upgrade failed and the previous version was restored"
+    else
+        write_state failed "The upgrade failed and the previous version couldn't be fully restored; see the log"
+        record upgrade failed "$from" "" "The upgrade failed and the previous version couldn't be fully restored"
+    fi
+    refresh_check
+    exit 0
+fi
+[[ $copy == true ]] && L snap-drop "$app" new > /dev/null 2>&1
+finished_ok=1
+msg=${arr_msg:-The upgrade failed (exit ${rc}); see the log}
+[[ $healthy == false && -z $arr_msg ]] && msg="The upgrade finished but ${app} didn't come back up; see the log"
+say "$msg"
+trim_log
+write_state failed "$msg"
+record upgrade failed "$from" "" "$msg"
+refresh_check
+exit 0

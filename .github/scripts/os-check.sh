@@ -195,6 +195,93 @@ for conf in /etc/nginx/apps/*.conf; do
 done
 code=$(curl -sk -o /dev/null -m 10 -w '%{http_code}' -u "${user}:${pass}" -H "Host: os-check.example" https://127.0.0.1/)
 [[ $code == 200 ]] && row "through nginx: / (panel)" "✅" "" "HTTP $code" || row "through nginx: / (panel)" "❌" "" "HTTP $code"
+# --- 5. the panel's upgrade jobs on real apps: copy, upgrade, rollback, hold (panel-upgrade-run)
+L() { python3 -I /etc/swizzin/scripts/panel-upgrade-lib "$@"; }
+jobstate() { python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(d['state'], '|', d['message'])" "/var/lib/swizzin/upgrades/$1.json" 2> /dev/null; }
+lasthist() { python3 -c "import json,sys; e=json.load(open(sys.argv[1]))['entries'][0]; print(e['app'], e['action'], e['result'], e.get('from'), e.get('to'), '|', e.get('message'))" /var/lib/swizzin/upgrades/history.json 2> /dev/null; }
+python3 /etc/swizzin/scripts/panel-host-collect > "$logs/panel-host-collect.log" 2>&1 || true
+step "update check" python3 /etc/swizzin/scripts/panel-updates-check || true
+if [[ -f /install/.autobrr.lock ]]; then
+    t0=$(date +%s)
+    step "panel upgrade autobrr" bash /etc/swizzin/scripts/panel-upgrade-run autobrr --by "$user"
+    st=$(jobstate autobrr)
+    if [[ $st == done* ]] && grep -q '"autobrr"' /var/lib/swizzin/upgrades/rollback.json 2> /dev/null; then
+        row "panel: upgrade autobrr (copy kept for rollback)" "✅" "$(($(date +%s) - t0))" "$(lasthist)"
+    else
+        row "panel: upgrade autobrr (copy kept for rollback)" "❌" "$(($(date +%s) - t0))" "${st:-no state}; $(tail -n2 /var/lib/swizzin/upgrades/autobrr.log | tr '\n' ' ' | clean)"
+    fi
+    t0=$(date +%s)
+    step "panel rollback autobrr" bash /etc/swizzin/scripts/panel-upgrade-run --rollback autobrr --by "$user"
+    st=$(jobstate autobrr)
+    if [[ $st == done* ]] && systemctl is-active -q "autobrr@${user}" && [[ $(L held autobrr) != "" ]]; then
+        row "panel: roll back autobrr (running, held)" "✅" "$(($(date +%s) - t0))" "$(lasthist)"
+    else
+        row "panel: roll back autobrr (running, held)" "❌" "$(($(date +%s) - t0))" "${st:-no state}; $(systemctl is-active "autobrr@${user}"); $(tail -n3 /var/lib/swizzin/upgrades/autobrr.log | tr '\n' ' ' | clean)"
+    fi
+    L release autobrr > /dev/null 2>&1 || true
+fi
+if [[ -f /install/.jellyfin.lock ]]; then
+    # the package copy (apt-get download) and the database copy as the jellyfin user, put back for real
+    t0=$(date +%s)
+    systemctl stop jellyfin
+    note=""
+    L snap-save jellyfin new > "$logs/panel_copy_jellyfin.log" 2>&1 && L snap-restore jellyfin new >> "$logs/panel_copy_jellyfin.log" 2>&1 || note="copy or restore failed: $(tail -n2 "$logs/panel_copy_jellyfin.log" | tr '\n' ' ' | clean)"
+    systemctl start jellyfin
+    sleep 10
+    systemctl is-active -q jellyfin || note="${note} jellyfin didn't start after the restore"
+    L snap-drop jellyfin new > /dev/null 2>&1
+    [[ -z $note ]] && row "panel: copy + restore jellyfin (packages + databases)" "✅" "$(($(date +%s) - t0))" "$(grep -c '^' "$logs/panel_copy_jellyfin.log") log lines" ||
+        row "panel: copy + restore jellyfin (packages + databases)" "❌" "$(($(date +%s) - t0))" "$note"
+fi
+if [[ -f /install/.prowlarr.lock ]]; then
+    # put an older Prowlarr in place, let the panel update it with Prowlarr's own updater, then roll back
+    t0=$(date +%s)
+    key=$(grep -oP '(?<=<ApiKey>)[^<]+' "/home/${user}/.config/Prowlarr/config.xml" 2> /dev/null)
+    port=$(grep -oP '(?<=<Port>)[^<]+' "/home/${user}/.config/Prowlarr/config.xml" 2> /dev/null)
+    base=$(grep -oP '(?<=<UrlBase>)[^<]+' "/home/${user}/.config/Prowlarr/config.xml" 2> /dev/null)
+    api="http://127.0.0.1:${port:-9696}${base:+/${base#/}}/api/v1"
+    ver() { curl -s -m 5 -H "X-Api-Key: $key" "$api/system/status" | python3 -c "import json,sys; print(json.load(sys.stdin)['version'])" 2> /dev/null; }
+    cur=$(ver)
+    older=$(curl -s -m 20 -H "X-Api-Key: $key" "$api/update" | python3 -c "
+import json, re, sys
+cur = tuple(int(x) for x in re.findall(r'\d+', sys.argv[1])[:4])
+ups = [u for u in json.load(sys.stdin) if u.get('url') and tuple(int(x) for x in re.findall(r'\d+', u.get('version', ''))[:4]) < cur]
+ups.sort(key=lambda u: tuple(int(x) for x in re.findall(r'\d+', u['version'])[:4]), reverse=True)
+print(ups[0]['version'], ups[0]['url']) if ups else None" "$cur" 2> /dev/null)
+    if [[ -z $cur || -z $older ]]; then
+        row "panel: Prowlarr update + rollback" "➖" "" "no older Prowlarr offered by its update list (installed ${cur:-?})"
+    else
+        oldver=${older%% *} oldurl=${older#* }
+        systemctl stop prowlarr
+        if curl -sfL -m 300 "$oldurl" -o /tmp/prowlarr-old.tar.gz && rm -rf /opt/Prowlarr && tar -xzf /tmp/prowlarr-old.tar.gz -C /opt; then
+            chown -R "${user}:" /opt/Prowlarr
+            rm -f "/home/${user}/.config/Prowlarr/prowlarr.db"*   # an older version can't open a newer database
+            systemctl start prowlarr
+            for _ in $(seq 1 60); do [[ -n $(ver) ]] && break; sleep 3; done
+            python3 /etc/swizzin/scripts/panel-updates-check > /dev/null 2>&1 || true
+            step "panel upgrade prowlarr" bash /etc/swizzin/scripts/panel-upgrade-run prowlarr --by "$user"
+            st=$(jobstate prowlarr) after=$(ver)
+            if [[ $st == done* && -n $after && $after != "$oldver" ]] && grep -q '"prowlarr"' /var/lib/swizzin/upgrades/rollback.json; then
+                row "panel: update Prowlarr ${oldver} with its own updater" "✅" "$(($(date +%s) - t0))" "$(lasthist)"
+                t0=$(date +%s)
+                step "panel rollback prowlarr" bash /etc/swizzin/scripts/panel-upgrade-run --rollback prowlarr --by "$user"
+                st=$(jobstate prowlarr) back=$(ver)
+                if [[ $st == done* && $back == "$oldver" ]]; then
+                    row "panel: roll Prowlarr back to ${oldver} (running, held)" "✅" "$(($(date +%s) - t0))" "$(lasthist)"
+                else
+                    row "panel: roll Prowlarr back to ${oldver} (running, held)" "❌" "$(($(date +%s) - t0))" "${st:-no state}; answers ${back:-nothing}; $(tail -n3 /var/lib/swizzin/upgrades/prowlarr.log | tr '\n' ' ' | clean)"
+                fi
+            else
+                row "panel: update Prowlarr ${oldver} with its own updater" "❌" "$(($(date +%s) - t0))" "${st:-no state}; answers ${after:-nothing}; $(tail -n3 /var/lib/swizzin/upgrades/prowlarr.log | tr '\n' ' ' | clean)"
+            fi
+        else
+            row "panel: Prowlarr update + rollback" "➖" "" "couldn't download Prowlarr ${oldver}"
+            systemctl start prowlarr
+        fi
+    fi
+fi
+cp -r /var/lib/swizzin/upgrades/*.log /var/lib/swizzin/upgrades/history.json "$logs/" 2> /dev/null || true
+
 {
     echo
     echo "Python $(python3 -V 2>&1 | cut -d' ' -f2), nginx $(nginx -v 2>&1 | grep -oE '[0-9.]+$'), PHP $(php -r 'echo PHP_VERSION;' 2> /dev/null || echo none), GCC $(gcc -dumpversion 2> /dev/null || echo none)"

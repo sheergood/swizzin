@@ -1,0 +1,1063 @@
+#!/usr/bin/env python3
+# swizzin panel — upgrade history, rollback copies, version holds and *arr updates (root, standard library only)
+#
+# Used by panel-upgrade-run (the root job behind the panel's Update / Roll back buttons), by panel-upgrade
+# (hold / release) and by panel-updates-check (updates made outside the panel). Never run through sudo
+# directly: the panel can only reach it through panel-upgrade, which checks every argument.
+#
+# Files in /var/lib/swizzin/upgrades (folder root:swizzin 0750)
+#   history.json        the last 200 updates, rollbacks, holds and outside changes (root:swizzin 0640)
+#   history/<id>.log    the job log kept with each history entry (root:swizzin 0640)
+#   holds.json          apps held at a version                     (root:swizzin 0640)
+#   rollback.json       apps that can go back one version          (root:swizzin 0640)
+#   snap/<app>/<slot>/  copies of an app's program and data         (root only, 0700)
+#                       new = taken just before an upgrade, last = the version before the current one,
+#                       undo = taken just before a rollback, so a failed rollback can be undone
+#
+# Safety: files in folders that belong to a user (home folders, /opt/Sonarr, /var/lib/jellyfin...) are
+# read and written by a child process running as that user, never as root, and every file is opened
+# without following symlinks. A user can only ever affect what they could already change themselves.
+# Part of the sheergood/swizzin fork. Licensed under GNU GPL v3.
+import argparse
+import fcntl
+import glob
+import grp
+import hashlib
+import json
+import os
+import pwd
+import re
+import secrets
+import shutil
+import sqlite3
+import stat
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+
+BASE = os.environ.get("SWZ_UPG_DIR", "/var/lib/swizzin/upgrades")
+UPDATES = os.environ.get("SWZ_UPDATES_FILE", "/var/lib/swizzin/updates.json")
+ARR_FILE = os.environ.get("SWZ_ARR_FILE", "/var/lib/swizzin/arr.json")
+FS = os.environ.get("SWZ_FS", "")          # tests only: a fake filesystem root for the app paths
+PANEL_GROUP = "swizzin"
+HISTORY_MAX = 200
+LOG_LINES = 300
+SPACE_MARGIN = 200 * 1024 * 1024           # free space left over after a copy
+ARR_APPS = {"sonarr": ("v3", "Sonarr"), "radarr": ("v3", "Radarr"), "prowlarr": ("v1", "Prowlarr"), "lidarr": ("v1", "Lidarr")}
+APT_APPS = {"plex": ["plexmediaserver"], "jellyfin": ["jellyfin", "jellyfin-server", "jellyfin-web"],
+            "ombi": ["ombi"], "emby": ["emby-server"]}
+# apps whose upgrade can be undone with the Roll back button
+ROLLBACK_APPS = ("autobrr", "filebrowser", "fbquantum", "navidrome", "netronome", "plex", "jellyfin") + tuple(ARR_APPS)
+APPS = ("autobrr", "filebrowser", "fbquantum", "plex", "navidrome", "netronome", "emby", "lounge", "jellyfin", "ombi") + tuple(ARR_APPS)
+SLOTS = ("new", "last", "undo")
+USER_RE = re.compile(r"^[a-z_][a-z0-9_.-]{0,31}$")
+
+
+class Fail(Exception):
+    pass
+
+
+# --------------------------------------------------------------------------- small helpers
+def p(path):
+    """An app path inside the (test) filesystem root."""
+    return FS + path if FS else path
+
+
+def now():
+    return int(time.time())
+
+
+def say(msg):
+    print(msg, flush=True)
+
+
+def panel_gid():
+    try:
+        return grp.getgrnam(PANEL_GROUP).gr_gid
+    except KeyError:
+        return None
+
+
+def ensure_base():
+    os.makedirs(BASE, exist_ok=True)
+    os.makedirs(os.path.join(BASE, "history"), exist_ok=True)
+    os.makedirs(os.path.join(BASE, "snap"), mode=0o700, exist_ok=True)
+    gid = panel_gid()
+    for d, mode in ((BASE, 0o750), (os.path.join(BASE, "history"), 0o750), (os.path.join(BASE, "snap"), 0o700)):
+        os.chmod(d, mode)
+        if os.geteuid() == 0:
+            os.chown(d, 0, gid if (gid is not None and mode == 0o750) else 0)
+
+
+def write_public(path, data):
+    """Atomically write a file the panel may read (root:swizzin 0640)."""
+    d = os.path.dirname(path)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp.")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(data if isinstance(data, str) else json.dumps(data, sort_keys=True))
+        os.chmod(tmp, 0o640)
+        gid = panel_gid()
+        if os.geteuid() == 0 and gid is not None:
+            os.chown(tmp, 0, gid)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def read_json(path, default):
+    try:
+        with open(path) as f:
+            v = json.load(f)
+        return v if isinstance(v, type(default)) else default
+    except (OSError, ValueError):
+        return default
+
+
+class Locked:
+    """One writer at a time for the shared files."""
+
+    def __init__(self, name):
+        self.path = os.path.join(BASE, "." + name + ".lock")
+
+    def __enter__(self):
+        ensure_base()
+        self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *a):
+        fcntl.flock(self.fd, fcntl.LOCK_UN)
+        os.close(self.fd)
+
+
+def run(cmd, timeout=600, log=True, **kw):
+    try:
+        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                           timeout=timeout, universal_newlines=True, **kw)
+    except (OSError, subprocess.SubprocessError) as e:
+        if log:
+            say("   {}: {}".format(cmd[0], e))
+        return 127, ""
+    if log and r.stdout.strip():
+        for line in r.stdout.strip().splitlines()[-30:]:
+            say("   " + line)
+    return r.returncode, r.stdout or ""
+
+
+def master_user():
+    try:
+        with open("/root/.master.info") as f:
+            u = f.read().split(":", 1)[0].strip()
+        return u if USER_RE.match(u) else None
+    except OSError:
+        return None
+
+
+def swizzin_users():
+    out = set()
+    for f in glob.glob("/root/*.info"):
+        try:
+            with open(f) as fh:
+                u = fh.read().split(":", 1)[0].strip()
+        except OSError:
+            continue
+        if USER_RE.match(u):
+            out.add(u)
+    m = master_user()
+    if m:
+        out.add(m)
+    return sorted(out)
+
+
+def installed_version(app):
+    """The installed version the last update check saw (updates.json), or None."""
+    a = (read_json(UPDATES, {}).get("apps") or {}).get(app)
+    v = a.get("installed") if isinstance(a, dict) else None
+    return str(v)[:64] if v else None
+
+
+# --------------------------------------------------------------------------- acting as a file's owner
+def _drop_to(uid, gid):
+    if os.geteuid() == uid:
+        return
+    os.setgroups([])
+    os.setgid(gid)
+    os.setuid(uid)
+
+
+def as_user(uid, gid, argv, stdin=None, stdout=None, timeout=1800):
+    """Run a command as uid:gid (with no extra groups)."""
+    try:
+        r = subprocess.run(argv, stdin=stdin if stdin is not None else subprocess.DEVNULL,
+                           stdout=stdout if stdout is not None else subprocess.PIPE, stderr=subprocess.PIPE,
+                           preexec_fn=lambda: _drop_to(uid, gid), timeout=timeout, cwd="/")
+        return r.returncode, (r.stderr or b"").decode("utf-8", "replace").strip()[-300:]
+    except (OSError, subprocess.SubprocessError) as e:
+        return 127, str(e)
+
+
+HELPER = os.path.abspath(__file__)
+
+
+def _safe_root_dir(d):
+    """True if only root can change anything along the path to d (no symlinks, nothing group/world writable)."""
+    d = os.path.abspath(d)
+    if os.path.realpath(d) != d:
+        return False
+    cur = d
+    while True:
+        try:
+            st = os.lstat(cur)
+        except OSError:
+            return False
+        if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0 or (st.st_mode & 0o022 and not st.st_mode & stat.S_ISVTX):
+            return False
+        if cur == "/":
+            return True
+        cur = os.path.dirname(cur)
+
+
+def actor_for(path, is_dir=False):
+    """(uid, gid) that may safely touch path: the owner of the folder it lives in (of the folder itself
+    for a program folder); root only when root alone controls that folder."""
+    target = path if is_dir else os.path.dirname(path)
+    if FS and os.geteuid() != 0:
+        # tests: everything belongs to the test user
+        return (os.geteuid(), os.getegid()) if os.path.isdir(target) else None
+    try:
+        st = os.lstat(target) if is_dir else os.stat(target)
+    except OSError:
+        return None
+    if is_dir and not stat.S_ISDIR(st.st_mode):
+        return None
+    if st.st_uid != 0:
+        try:
+            gid = pwd.getpwuid(st.st_uid).pw_gid
+        except KeyError:
+            gid = st.st_gid
+        if is_dir and not _safe_root_dir(os.path.dirname(target)):
+            return None                      # a program folder must sit in a folder only root controls
+        return st.st_uid, gid
+    return (0, 0) if _safe_root_dir(target if is_dir else os.path.dirname(path)) else None
+
+
+# child commands (run as the owner through as_user): read a file to stdout, write stdin to a file
+def child_read(path):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return 3
+    except OSError as e:
+        print("can't read {}: {}".format(path, e.strerror), file=sys.stderr)
+        return 4
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        os.close(fd)
+        return 4
+    os.set_blocking(fd, True)
+    out = sys.stdout.buffer
+    out.write(json.dumps({"mode": stat.S_IMODE(st.st_mode)}).encode() + b"\n")
+    with os.fdopen(fd, "rb") as f:
+        shutil.copyfileobj(f, out, 1 << 20)
+    out.flush()
+    return 0
+
+
+def child_sqlite(path):
+    """A consistent copy of a live SQLite database (the app keeps running), written to stdout."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return 3
+    if not stat.S_ISREG(st.st_mode):
+        return 4
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".panel-copy.")
+    os.close(fd)
+    try:
+        src = sqlite3.connect(path, timeout=60)     # only read: the backup API never writes the source
+        dst = sqlite3.connect(tmp)
+        with dst:
+            src.backup(dst)
+        src.close()
+        dst.close()
+        out = sys.stdout.buffer
+        out.write(json.dumps({"mode": stat.S_IMODE(st.st_mode)}).encode() + b"\n")
+        with open(tmp, "rb") as f:
+            shutil.copyfileobj(f, out, 1 << 20)
+        out.flush()
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    return 0
+
+
+def child_write(path, mode):
+    """Replace path with stdin: a new file next to it, then renamed over it (never follows a symlink)."""
+    d = os.path.dirname(path)
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".panel-restore.")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            shutil.copyfileobj(sys.stdin.buffer, f, 1 << 20)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, int(mode, 8) & 0o7777)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return 0
+
+
+def child_remove(path):
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return 0
+    if stat.S_ISDIR(st.st_mode):
+        return 4
+    os.unlink(path)
+    return 0
+
+
+def child_hash(path):
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        print("absent")
+        return 0
+    except OSError:
+        print("unreadable")
+        return 0
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        os.close(fd)
+        print("not-a-file")
+        return 0
+    os.set_blocking(fd, True)
+    h = hashlib.sha256()
+    with os.fdopen(fd, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    print(h.hexdigest())
+    return 0
+
+
+def owner_cmd(uid, gid, args, **kw):
+    return as_user(uid, gid, [sys.executable, "-I", HELPER, "_child"] + args, **kw)
+
+
+# --------------------------------------------------------------------------- what each app is made of
+def _unit_text(name):
+    try:
+        with open(p("/etc/systemd/system/{}.service".format(name))) as f:
+            return f.read()
+    except OSError:
+        return ""
+
+
+def arr_layout(app):
+    """(program folder, data folder) of a Servarr app, from its systemd unit."""
+    unit = _unit_text(app)
+    exe = re.search(r"^ExecStart=(\S+)", unit, re.M)
+    data = re.search(r"-data=(\S+)", unit)
+    prog = os.path.dirname(exe.group(1)) if exe else "/opt/" + ARR_APPS[app][1]
+    if data:
+        datadir = data.group(1).rstrip("/")
+    else:
+        u = re.search(r"^User=(\S+)", unit, re.M)
+        datadir = "/home/{}/.config/{}".format(u.group(1) if u else master_user(), ARR_APPS[app][1])
+    if not prog.startswith("/") or ".." in prog.split("/") or prog in ("/", "/opt", "/usr", "/usr/bin"):
+        prog = "/opt/" + ARR_APPS[app][1]
+    return prog, datadir
+
+
+def _default_env(path, key):
+    try:
+        with open(p(path)) as f:
+            m = re.search(r'^\s*{}\s*=\s*"?([^"\n]+)"?'.format(re.escape(key)), f.read(), re.M)
+            return m.group(1).strip() if m else None
+    except OSError:
+        return None
+
+
+def _db(path, role="data"):
+    return [{"type": "file", "path": path + s, "role": role, "optional": True} for s in ("", "-wal", "-shm")]
+
+
+def spec(app):
+    """units (started/stopped around the job), items (copied for rollback), live (copy while running)."""
+    m = master_user()
+    users = swizzin_users()
+    s = {"units": [], "items": [], "live": False}
+    if app == "autobrr":
+        s["units"] = ["autobrr@" + u for u in users]
+        s["items"] = [{"type": "file", "path": "/usr/bin/autobrr", "role": "prog"},
+                      {"type": "file", "path": "/usr/bin/autobrrctl", "role": "prog", "optional": True}]
+        for u in users:
+            s["items"] += _db("/home/{}/.config/autobrr/autobrr.db".format(u))
+            s["items"].append({"type": "file", "path": "/home/{}/.config/autobrr/config.toml".format(u), "role": "data", "optional": True})
+    elif app == "filebrowser" and m:
+        s["units"] = ["filebrowser"]
+        s["items"] = [{"type": "file", "path": "/home/{}/bin/filebrowser".format(m), "role": "prog"}] + \
+            _db("/home/{}/.config/Filebrowser/filebrowser.db".format(m))
+    elif app == "fbquantum" and m:
+        conf = "/home/{}/.config/fbquantum".format(m)
+        s["units"] = ["fbquantum"]
+        s["items"] = [{"type": "file", "path": "/opt/fbquantum/filebrowser", "role": "prog"}] + \
+            _db(conf + "/fbquantum.db") + [{"type": "file", "path": conf + "/config.yaml", "role": "data", "optional": True}]
+    elif app == "navidrome" and m:
+        s["units"] = ["navidrome"]
+        s["items"] = [{"type": "file", "path": "/opt/navidrome/navidrome", "role": "prog"}]
+        toml = "/home/{}/.config/navidrome/navidrome.toml".format(m)
+        nd = _default_env(toml, "DataFolder")
+        if not nd:
+            w = re.search(r"^WorkingDirectory=(\S+)", _unit_text("navidrome"), re.M)
+            nd = w.group(1) if w else None
+        if nd:
+            s["items"] += _db(nd.rstrip("/") + "/navidrome.db")
+        s["items"].append({"type": "file", "path": toml, "role": "data", "optional": True})
+    elif app == "netronome":
+        s["units"] = ["netronome@" + u for u in users]
+        s["items"] = [{"type": "file", "path": "/usr/bin/netronome", "role": "prog"}]
+        for u in users:
+            s["items"] += _db("/home/{}/.config/netronome/netronome.db".format(u))
+            s["items"].append({"type": "file", "path": "/home/{}/.config/netronome/config.toml".format(u), "role": "data", "optional": True})
+    elif app == "plex":
+        s["units"] = ["plexmediaserver"]
+        sup = _default_env("/etc/default/plexmediaserver", "PLEX_MEDIA_SERVER_APPLICATION_SUPPORT_DIR") or \
+            "/var/lib/plexmediaserver/Library/Application Support"
+        dbs = sup.rstrip("/") + "/Plex Media Server/Plug-in Support/Databases/"
+        s["items"] = [{"type": "debs", "pkgs": APT_APPS["plex"], "role": "prog"}] + \
+            _db(dbs + "com.plexapp.plugins.library.db") + _db(dbs + "com.plexapp.plugins.library.blobs.db")
+    elif app == "jellyfin":
+        s["units"] = ["jellyfin"]
+        data = (_default_env("/etc/default/jellyfin", "JELLYFIN_DATA_DIR") or "/var/lib/jellyfin").rstrip("/")
+        conf = (_default_env("/etc/default/jellyfin", "JELLYFIN_CONFIG_DIR") or "/etc/jellyfin").rstrip("/")
+        s["items"] = [{"type": "debs", "pkgs": APT_APPS["jellyfin"], "role": "prog"}]
+        for f in sorted(glob.glob(p(data + "/data/*.db"))):
+            s["items"] += _db(f[len(FS):] if FS else f)
+        for f in sorted(glob.glob(p(conf + "/*.xml"))):
+            s["items"].append({"type": "file", "path": f[len(FS):] if FS else f, "role": "data", "optional": True})
+    elif app in ARR_APPS:
+        prog, datadir = arr_layout(app)
+        s["units"] = [app]
+        s["live"] = True                 # the app installs its own update, so it keeps running while copied
+        s["items"] = [{"type": "dir", "path": prog, "role": "prog"},
+                      {"type": "sqlite", "path": "{}/{}.db".format(datadir, app), "role": "data"}]
+    return s
+
+
+# --------------------------------------------------------------------------- copies (snapshots)
+def slot_dir(app, slot):
+    return os.path.join(BASE, "snap", app, slot)
+
+
+def _free(path):
+    try:
+        st = os.statvfs(path)
+        return st.f_bavail * st.f_frsize
+    except OSError:
+        return 0
+
+
+def _size(item):
+    path = p(item["path"])
+    try:
+        if item["type"] == "dir":
+            total = 0
+            for root, dirs, files in os.walk(path):
+                for f in files:
+                    try:
+                        total += os.lstat(os.path.join(root, f)).st_size
+                    except OSError:
+                        pass
+            return total
+        if item["type"] == "debs":
+            return 600 * 1024 * 1024 if item["pkgs"] and item["pkgs"][0] == "plexmediaserver" else 300 * 1024 * 1024
+        return os.lstat(path).st_size
+    except OSError:
+        return 0
+
+
+def pkg_version(pkg):
+    rc, out = run(["dpkg-query", "-W", "-f=${Version} ${db:Status-Abbrev}", pkg], log=False, timeout=30)
+    if rc != 0:
+        return None
+    parts = out.split()
+    return parts[0] if len(parts) >= 2 and parts[1].startswith("ii") else None
+
+
+def _deb_from_cache(pkg, ver):
+    enc = ver.replace(":", "%3a")
+    for f in glob.glob("/var/cache/apt/archives/{}_{}_*.deb".format(pkg, enc)):
+        return f
+    return None
+
+
+def fingerprint(item, meta_item=None):
+    """What the program part looks like now, to know whether a copy still matches what's installed."""
+    path = p(item["path"])
+    if item["type"] == "debs":
+        return " ".join("{}={}".format(k, pkg_version(k) or "-") for k in item["pkgs"])
+    if item["type"] == "dir":
+        h = hashlib.sha256()
+        if not os.path.isdir(path) or os.path.islink(path):
+            return "absent"
+        for root, dirs, files in os.walk(path):
+            dirs.sort()
+            for f in sorted(files):
+                full = os.path.join(root, f)
+                try:
+                    st = os.lstat(full)
+                except OSError:
+                    continue
+                if stat.S_ISREG(st.st_mode):
+                    h.update("{}\0{}\0{}\n".format(os.path.relpath(full, path), st.st_size, int(st.st_mtime)).encode())
+        return h.hexdigest()
+    act = actor_for(path)
+    if not act:
+        return "absent" if not os.path.lexists(path) else "unreachable"
+    try:
+        r = subprocess.run([sys.executable, "-I", HELPER, "_child", "hash", path], stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL, preexec_fn=lambda: _drop_to(*act), timeout=600, cwd="/")
+        return r.stdout.decode().strip() or "unreadable"
+    except (OSError, subprocess.SubprocessError):
+        return "unreadable"
+
+
+def program_fp(items):
+    return [fingerprint(i) for i in items if i.get("role") == "prog"]
+
+
+def snap_save(app, slot):
+    """Copy the app's program and data into snap/<app>/<slot>. Returns (complete, reason)."""
+    if app not in ROLLBACK_APPS:
+        raise Fail("{} has no rollback copies".format(app))
+    s = spec(app)
+    if not s["items"]:
+        raise Fail("couldn't tell where {} keeps its files".format(app))
+    ensure_base()
+    d = slot_dir(app, slot)
+    shutil.rmtree(d, ignore_errors=True)
+    os.makedirs(d, mode=0o700)
+    os.chmod(os.path.dirname(d), 0o700)
+    need = sum(_size(i) for i in s["items"])
+    free = _free(d)
+    data_ok = free >= need + SPACE_MARGIN
+    complete, reasons = True, []
+    if not data_ok:
+        say("   not enough free space for a full copy (needs {} MB, {} MB free); keeping the program only".format(
+            need // 1048576, free // 1048576))
+        complete = False
+        reasons.append("not enough free space to keep a copy of its data")
+    out_items = []
+    for n, item in enumerate(s["items"]):
+        it = dict(item, state="failed")
+        path = p(item["path"])
+        name = "{:03d}".format(n)
+        if item["role"] == "data" and not data_ok:
+            it["state"] = "skipped"
+        elif item["type"] == "debs":
+            debdir = os.path.join(d, "debs")
+            os.makedirs(debdir, exist_ok=True)
+            got, want = [], []
+            for pkg in item["pkgs"]:
+                ver = pkg_version(pkg)
+                if not ver:
+                    continue
+                want.append(pkg)
+                rc, _ = run(["apt-get", "download", "-q", "{}={}".format(pkg, ver)], timeout=900, cwd=debdir)
+                found = glob.glob(os.path.join(debdir, "{}_*.deb".format(pkg)))
+                if rc != 0 or not found:
+                    cached = _deb_from_cache(pkg, ver)
+                    if cached:
+                        shutil.copy2(cached, debdir)
+                        found = [cached]
+                if found:
+                    got.append(pkg)
+                else:
+                    say("   couldn't keep a copy of {} {} (no longer offered by its repository)".format(pkg, ver))
+            it["pkgs_kept"] = got
+            it["versions"] = {k: pkg_version(k) for k in want}
+            it["state"] = "present" if want and len(got) == len(want) else "failed"
+        elif item["type"] == "dir":
+            act = actor_for(path, is_dir=True)
+            if not act:
+                it["state"] = "failed"
+            else:
+                it["uid"], it["gid"] = act
+                with open(os.path.join(d, name + ".tar"), "wb") as f:
+                    rc, err = as_user(act[0], act[1], ["tar", "-C", path, "-cf", "-", "."], stdout=f)
+                it["state"] = "present" if rc == 0 else "failed"
+                if rc != 0:
+                    say("   copying {} failed: {}".format(item["path"], err))
+        else:
+            act = actor_for(path)
+            if not act:
+                it["state"] = "absent" if not os.path.lexists(path) and item.get("optional") else "failed"
+            else:
+                it["uid"], it["gid"] = act
+                mode = "sqlite" if item["type"] == "sqlite" else "read"
+                target = os.path.join(d, name)
+                with open(target, "wb") as f:
+                    rc, err = owner_cmd(act[0], act[1], [mode, path], stdout=f)
+                if rc == 0:
+                    with open(target, "rb") as f:
+                        head = f.readline()
+                        try:
+                            it["mode"] = oct(int(json.loads(head)["mode"]))
+                        except (ValueError, KeyError, TypeError):
+                            it["state"] = "failed"
+                        else:
+                            it["state"] = "present"
+                            it["offset"] = len(head)
+                elif rc == 3:
+                    it["state"] = "absent"
+                    os.unlink(target)
+                else:
+                    say("   copying {} failed ({})".format(item["path"], err or rc))
+        if it["state"] == "failed" or (it["state"] == "absent" and not item.get("optional")):
+            complete = False
+            reasons.append("couldn't copy " + (item.get("path") or " ".join(item.get("pkgs", []))))
+        out_items.append(it)
+    meta = {"app": app, "slot": slot, "at": now(), "items": out_items, "complete": complete,
+            "reason": "; ".join(reasons)[:300], "fp": program_fp(out_items), "version": installed_version(app)}
+    with open(os.path.join(d, "meta.json"), "w") as f:
+        json.dump(meta, f)
+    say("   copy kept for {} ({}){}".format(app, slot, "" if complete else ": incomplete, " + meta["reason"]))
+    return complete, meta["reason"]
+
+
+def snap_meta(app, slot):
+    return read_json(os.path.join(slot_dir(app, slot), "meta.json"), {})
+
+
+def snap_restore(app, slot):
+    """Put the files of a copy back. The app's services must be stopped. Returns (ok, reason)."""
+    meta = snap_meta(app, slot)
+    if not meta.get("items"):
+        raise Fail("there's no copy to restore")
+    d = slot_dir(app, slot)
+    problems = []
+    for n, it in enumerate(meta["items"]):
+        name = "{:03d}".format(n)
+        path = p(it["path"]) if it.get("path") else None
+        if it["state"] in ("skipped", "failed") and it["type"] != "debs":
+            continue
+        if it["type"] == "debs":
+            debs = sorted(glob.glob(os.path.join(d, "debs", "*.deb")))
+            if it["state"] != "present" or not debs:
+                problems.append("no package copy")
+                continue
+            rc, _ = run(["apt-get", "install", "-y", "-q", "--allow-downgrades", "--allow-change-held-packages",
+                         "-o", "Dpkg::Options::=--force-confold", "-o", "DPkg::Lock::Timeout=300"] + debs, timeout=1800,
+                        env=dict(os.environ, DEBIAN_FRONTEND="noninteractive"))
+            if rc != 0:
+                problems.append("reinstalling the previous package failed")
+            continue
+        if it["type"] == "dir":
+            act = actor_for(path, is_dir=True) if os.path.isdir(path) else None
+            uid, gid = it.get("uid"), it.get("gid")
+            if act and act[0] != uid:
+                problems.append("{} now belongs to someone else".format(it["path"]))
+                continue
+            parent = os.path.dirname(path)
+            if not (FS and os.geteuid() != 0) and not _safe_root_dir(parent):
+                problems.append("{} isn't in a folder only root controls".format(it["path"]))
+                continue
+            old = "{}/.{}.panel-old".format(parent, os.path.basename(path))
+            shutil.rmtree(old, ignore_errors=True)
+            if os.path.lexists(path):
+                os.rename(path, old)
+            os.mkdir(path, 0o755)
+            if os.geteuid() == 0:
+                os.chown(path, uid, gid)
+            with open(os.path.join(d, name + ".tar"), "rb") as f:
+                rc, err = as_user(uid, gid, ["tar", "-C", path, "-xf", "-"], stdin=f)
+            if rc != 0:
+                say("   restoring {} failed: {}".format(it["path"], err))
+                shutil.rmtree(path, ignore_errors=True)
+                if os.path.lexists(old):
+                    os.rename(old, path)
+                problems.append("restoring {} failed".format(it["path"]))
+            else:
+                shutil.rmtree(old, ignore_errors=True)
+            continue
+        if it["state"] == "absent" and not os.path.lexists(path):
+            continue
+        act = actor_for(path)
+        if not act or (it["state"] == "present" and act[0] != it.get("uid")):
+            problems.append("{} now belongs to someone else".format(it["path"]))
+            continue
+        if it["state"] == "absent":
+            rc, err = owner_cmd(act[0], act[1], ["remove", path])
+        else:
+            with open(os.path.join(d, name), "rb") as f:
+                f.seek(int(it.get("offset", 0)))
+                rc, err = owner_cmd(act[0], act[1], ["write", path, it.get("mode", "0o644").replace("0o", "")], stdin=f)
+        if rc != 0:
+            problems.append("restoring {} failed".format(it["path"]))
+            say("   restoring {} failed ({})".format(it["path"], err or rc))
+    ok = not problems
+    say("   {} files {}".format(app, "restored" if ok else "partly restored: " + "; ".join(problems)))
+    return ok, "; ".join(problems)[:300]
+
+
+def snap_drop(app, slot):
+    shutil.rmtree(slot_dir(app, slot), ignore_errors=True)
+
+
+def snap_keep(app, frm, to):
+    """After a good upgrade: the copy taken before it becomes the one Roll back uses."""
+    meta = snap_meta(app, "new")
+    if not meta:
+        return
+    snap_drop(app, "last")
+    if not meta.get("complete"):
+        snap_drop(app, "new")
+        say("   no rollback copy kept: " + (meta.get("reason") or "the copy was incomplete"))
+        write_rollbacks()
+        return
+    meta.update(slot="last", previous=frm or meta.get("version"), current=to, kept=now(),
+                fp_after=program_fp(meta["items"]))
+    with open(os.path.join(slot_dir(app, "new"), "meta.json"), "w") as f:
+        json.dump(meta, f)
+    os.rename(slot_dir(app, "new"), slot_dir(app, "last"))
+    write_rollbacks()
+
+
+def snap_check(app):
+    """Does the rollback copy still fit what's installed now? (raises Fail with the reason if not)"""
+    meta = snap_meta(app, "last")
+    if not meta.get("complete"):
+        raise Fail("there's no copy of the previous version to go back to")
+    if program_fp(meta["items"]) != meta.get("fp_after"):
+        raise Fail("{} was changed after that update (updated or reinstalled outside the panel), "
+                   "so the kept copy no longer fits".format(app))
+    return meta
+
+
+def snap_verify(app, slot):
+    """After a restore: is the program exactly what the copy had?"""
+    meta = snap_meta(app, slot)
+    return bool(meta) and program_fp(meta["items"]) == meta.get("fp")
+
+
+def write_rollbacks():
+    out = {}
+    for app in ROLLBACK_APPS:
+        m = snap_meta(app, "last")
+        if m.get("complete"):
+            out[app] = {"previous": m.get("previous"), "current": m.get("current"), "at": m.get("kept")}
+    ensure_base()
+    write_public(os.path.join(BASE, "rollback.json"), out)
+
+
+# --------------------------------------------------------------------------- history
+def _clean(s, n=300):
+    return re.sub(r"[\x00-\x1f\x7f]+", " ", str(s or "")).strip()[:n] or None
+
+
+def history_add(app, action, result, frm=None, to=None, by=None, started=None, message=None, log=None):
+    entry = {"id": "{}-{}".format(now(), secrets.token_hex(3)), "app": app, "action": action, "result": result,
+             "from": _clean(frm, 64), "to": _clean(to, 64), "by": by if by and USER_RE.match(by) else None,
+             "started": int(started) if str(started or "").isdigit() else now(), "finished": now(), "message": _clean(message), "log": False}
+    with Locked("history"):
+        if log and os.path.isfile(log):
+            try:
+                with open(log, "rb") as f:
+                    lines = f.read().decode("utf-8", "replace").splitlines()[-LOG_LINES:]
+                text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\(B", "", "\n".join(lines))
+                write_public(os.path.join(BASE, "history", entry["id"] + ".log"), text + "\n")
+                entry["log"] = True
+            except OSError:
+                pass
+        h = read_json(os.path.join(BASE, "history.json"), {}).get("entries")
+        h = [e for e in (h if isinstance(h, list) else []) if isinstance(e, dict)]
+        h.insert(0, entry)
+        keep = h[:HISTORY_MAX]
+        write_public(os.path.join(BASE, "history.json"), {"entries": keep})
+        live = {e.get("id") for e in keep}
+        for f in glob.glob(os.path.join(BASE, "history", "*.log")):
+            if os.path.basename(f)[:-4] not in live:
+                try:
+                    os.unlink(f)
+                except OSError:
+                    pass
+    return entry["id"]
+
+
+def history_entries():
+    h = read_json(os.path.join(BASE, "history.json"), {}).get("entries")
+    return [e for e in (h if isinstance(h, list) else []) if isinstance(e, dict)]
+
+
+def note_detected(app, old, new):
+    """The update check saw a version change the panel didn't make: record it (once)."""
+    if not old or not new or old == new:
+        return False
+    for e in history_entries()[:50]:
+        if e.get("app") != app:
+            continue
+        if e.get("to") == new and now() - int(e.get("finished") or 0) < 3 * 86400:
+            return False                     # the panel's own update or rollback, already in the history
+        break
+    newer = [int(x) for x in re.findall(r"\d+", new)[:4]] > [int(x) for x in re.findall(r"\d+", old)[:4]]
+    history_add(app, "detected", "info", old, new,
+                message="Updated outside the panel" if newer else "Changed outside the panel")
+    # a copy kept for Roll back no longer fits a version someone else installed
+    if app in ROLLBACK_APPS and snap_meta(app, "last"):
+        snap_drop(app, "last")
+        write_rollbacks()
+    return True
+
+
+# --------------------------------------------------------------------------- holds
+def holds():
+    return read_json(os.path.join(BASE, "holds.json"), {})
+
+
+def hold(app, version, by=None, why=None, quiet=False):
+    with Locked("holds"):
+        h = holds()
+        h[app] = {"version": _clean(version, 64), "since": now(), "by": by if by and USER_RE.match(by) else None}
+        write_public(os.path.join(BASE, "holds.json"), h)
+    for pkg in APT_APPS.get(app, []):
+        if pkg_version(pkg):
+            run(["apt-mark", "hold", pkg], timeout=120)
+    if not quiet:
+        history_add(app, "hold", "info", to=version, by=by, message=why or "Held at this version")
+
+
+def release(app, by=None):
+    with Locked("holds"):
+        h = holds()
+        was = h.pop(app, None)
+        write_public(os.path.join(BASE, "holds.json"), h)
+    for pkg in APT_APPS.get(app, []):
+        if pkg_version(pkg):
+            run(["apt-mark", "unhold", pkg], timeout=120)
+    if was:
+        history_add(app, "release", "info", to=(was or {}).get("version"), by=by, message="Released: updates are offered again")
+    return bool(was)
+
+
+# --------------------------------------------------------------------------- Sonarr / Radarr / Prowlarr / Lidarr
+def arr_conf(app):
+    a = read_json(ARR_FILE, {}).get(app)
+    if not isinstance(a, dict):
+        return None
+    url, key = str(a.get("url", "")), str(a.get("key", ""))
+    if not re.match(r"^http://127\.0\.0\.1:\d{1,5}(/[A-Za-z0-9._~/-]*)?$", url) or not re.match(r"^[A-Za-z0-9]{20,64}$", key):
+        return None
+    return {"url": url.rstrip("/"), "key": key}
+
+
+def arr_api(app, conf, path, body=None, timeout=10):
+    url = "{}/api/{}/{}".format(conf["url"], ARR_APPS[app][0], path)
+    data = json.dumps(body).encode() if body is not None else None
+    req = urllib.request.Request(url, data=data, headers={"X-Api-Key": conf["key"], "Accept": "application/json",
+                                                          "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8", "replace") or "null")
+
+
+def arr_version(app, conf, timeout=5):
+    try:
+        return (arr_api(app, conf, "system/status", timeout=timeout) or {}).get("version")
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+
+
+def vt(v):
+    return tuple(int(x) for x in re.findall(r"\d+", str(v or ""))[:4]) or (0,)
+
+
+ARR_TIMEOUT = int(os.environ.get("SWZ_ARR_TIMEOUT", 15 * 60))
+ARR_POLL = float(os.environ.get("SWZ_ARR_POLL", 5))
+
+
+def arr_update(app, major=False):
+    """Ask the app's own updater to install its newest version and wait for it.
+    Returns (rc, message, from, to): rc 0 updated, 100 nothing installed, 1 failed."""
+    conf = arr_conf(app)
+    name = ARR_APPS[app][1]
+    if not conf:
+        return 1, "The panel doesn't have {}'s API details yet".format(name), None, None
+    cur = arr_version(app, conf, timeout=10)
+    if not cur:
+        return 1, "{} isn't answering".format(name), None, None
+    try:
+        ups = arr_api(app, conf, "update", timeout=30)
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        return 1, "{} couldn't list its updates ({})".format(name, e), cur, None
+    newer = [u for u in (ups if isinstance(ups, list) else []) if isinstance(u, dict) and vt(u.get("version")) > vt(cur)]
+    if not newer:
+        return 100, "{} {} is already the newest version".format(name, cur), cur, cur
+    best = max(newer, key=lambda u: vt(u.get("version")))
+    want = str(best.get("version"))
+    if vt(want)[0] > vt(cur)[0] and not major:
+        return 100, "{} {} is a new major version; confirm it first".format(name, want), cur, cur
+    body = {"name": "ApplicationUpdate"}
+    if vt(want)[0] > vt(cur)[0]:
+        body["installMajorUpdate"] = True
+    try:
+        c = arr_api(app, conf, "command", body, timeout=15) or {}
+    except urllib.error.HTTPError as e:
+        return 1, "{} refused the update (HTTP {})".format(name, e.code), cur, None
+    except (urllib.error.URLError, OSError, ValueError):
+        return 1, "{} isn't answering".format(name), cur, None
+    cid = c.get("id") if isinstance(c.get("id"), int) else None
+    say("== asked {} {} to install {}{}".format(name, cur, want, " (major version, confirmed)" if body.get("installMajorUpdate") else ""))
+    start = time.time()
+    seen_down = False
+    while time.time() - start < ARR_TIMEOUT:
+        time.sleep(ARR_POLL)
+        ver = arr_version(app, conf, timeout=4)
+        if not ver:
+            if not seen_down:
+                say("== {} is restarting".format(name))
+            seen_down = True
+            continue
+        if vt(ver) > vt(cur):
+            say("== {} is running {}".format(name, ver))
+            return 0, "Updated to {}".format(ver), cur, ver
+        if cid:
+            try:
+                st = arr_api(app, conf, "command/{}".format(cid), timeout=4) or {}
+            except (urllib.error.URLError, OSError, ValueError):
+                st = {}
+            status = str(st.get("status", "")).lower()
+            if status in ("failed", "aborted", "cancelled", "orphaned"):
+                msg = _clean(st.get("exception") or st.get("message") or "{}'s updater reported a failure".format(name))
+                return 1, msg, cur, None
+            if status == "completed" and time.time() - start > 120:
+                msg = _clean(st.get("message")) or "{} finished without installing the update".format(name)
+                return 100, msg, cur, cur
+    return 1, "No new version after {} minutes; check {}".format(ARR_TIMEOUT // 60, name), cur, None
+
+
+def arr_wait(app, timeout=180):
+    conf = arr_conf(app)
+    if not conf:
+        return None
+    start = time.time()
+    while time.time() - start < timeout:
+        v = arr_version(app, conf, timeout=4)
+        if v:
+            return v
+        time.sleep(min(ARR_POLL, 5))
+    return None
+
+
+# --------------------------------------------------------------------------- command line
+def main(argv):
+    if argv[:1] == ["_child"]:
+        cmd, rest = argv[1], argv[2:]
+        fn = {"read": child_read, "sqlite": child_sqlite, "remove": child_remove, "hash": child_hash}.get(cmd)
+        if fn:
+            return fn(rest[0])
+        if cmd == "write":
+            return child_write(rest[0], rest[1])
+        return 2
+    ap = argparse.ArgumentParser(prog="panel-upgrade-lib")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    for c in ("units", "snap-check", "snap-verify-last", "snap-verify-undo", "rollbacks", "installed", "can-rollback"):
+        sub.add_parser(c).add_argument("app", choices=APPS)
+    for c in ("snap-save", "snap-restore", "snap-drop"):
+        x = sub.add_parser(c)
+        x.add_argument("app", choices=APPS)
+        x.add_argument("slot", choices=SLOTS)
+    x = sub.add_parser("snap-keep")
+    x.add_argument("app", choices=APPS)
+    x.add_argument("--from", dest="frm")
+    x.add_argument("--to")
+    x = sub.add_parser("history-add")
+    x.add_argument("app", choices=APPS + ("qbittorrent", "rtorrent", "rutorrent", "flood", "transmission", "qui", "deluge"))
+    x.add_argument("--action", required=True, choices=("upgrade", "rollback", "hold", "release", "detected"))
+    x.add_argument("--result", required=True, choices=("done", "failed", "restored", "unchanged", "info"))
+    for o in ("--from", "--to", "--by", "--started", "--message", "--log"):
+        x.add_argument(o)
+    x = sub.add_parser("hold")
+    x.add_argument("app", choices=APPS)
+    x.add_argument("--version")
+    x.add_argument("--by")
+    x.add_argument("--why")
+    x.add_argument("--quiet", action="store_true")
+    x = sub.add_parser("release")
+    x.add_argument("app", choices=APPS)
+    x.add_argument("--by")
+    sub.add_parser("held").add_argument("app", choices=APPS)
+    x = sub.add_parser("arr-update")
+    x.add_argument("app", choices=tuple(ARR_APPS))
+    x.add_argument("--major", action="store_true")
+    sub.add_parser("arr-wait").add_argument("app", choices=tuple(ARR_APPS))
+    a = ap.parse_args(argv)
+    try:
+        if a.cmd == "units":
+            print("\n".join(spec(a.app)["units"]))
+        elif a.cmd == "can-rollback":
+            return 0 if a.app in ROLLBACK_APPS else 1
+        elif a.cmd == "installed":
+            print(installed_version(a.app) or "")
+        elif a.cmd == "snap-save":
+            complete, _ = snap_save(a.app, a.slot)
+            return 0 if complete else 3
+        elif a.cmd == "snap-restore":
+            ok, _ = snap_restore(a.app, a.slot)
+            return 0 if ok else 1
+        elif a.cmd == "snap-drop":
+            snap_drop(a.app, a.slot)
+            if a.slot == "last":
+                write_rollbacks()
+        elif a.cmd == "snap-keep":
+            snap_keep(a.app, a.frm, a.to)
+        elif a.cmd == "snap-check":
+            m = snap_check(a.app)
+            print("{}\t{}".format(m.get("previous") or "", m.get("current") or ""))
+        elif a.cmd == "snap-verify-last":
+            return 0 if snap_verify(a.app, "last") else 1
+        elif a.cmd == "snap-verify-undo":
+            return 0 if snap_verify(a.app, "undo") else 1
+        elif a.cmd == "rollbacks":
+            write_rollbacks()
+        elif a.cmd == "history-add":
+            print(history_add(a.app, a.action, a.result, getattr(a, "from"), a.to, a.by, a.started, a.message, a.log))
+        elif a.cmd == "hold":
+            hold(a.app, a.version or installed_version(a.app) or "current", a.by, a.why, a.quiet)
+        elif a.cmd == "release":
+            return 0 if release(a.app, a.by) else 1
+        elif a.cmd == "held":
+            h = holds().get(a.app)
+            if not h:
+                return 1
+            print(h.get("version") or "")
+        elif a.cmd == "arr-update":
+            rc, msg, frm, to = arr_update(a.app, a.major)
+            print("\x1f".join(("RESULT", frm or "", to or "", msg or "")))
+            return rc
+        elif a.cmd == "arr-wait":
+            v = arr_wait(a.app)
+            if not v:
+                return 1
+            print(v)
+    except Fail as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

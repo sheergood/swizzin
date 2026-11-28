@@ -36,7 +36,7 @@ jobs:
       - name: shellcheck the panel's update scripts (warnings too)
         run: shellcheck -S warning -x scripts/panel-upgrade scripts/panel-upgrade-run
       - name: python collectors
-        run: python3 -m py_compile scripts/panel-f2b-collect scripts/panel-host-collect scripts/panel-updates-check
+        run: python3 -m py_compile scripts/panel-f2b-collect scripts/panel-host-collect scripts/panel-updates-check scripts/panel-upgrade-lib
       - name: update check (all sources faked)
         run: python3 .github/scripts/test-panel-updates.py && python3 .github/scripts/test-f2b-collect.py
       - name: fail2ban web jails (config accepted, filters match only attacks)
@@ -70,14 +70,22 @@ jobs:
       - name: panel-upgrade refuses anything outside its list
         run: |
           set -u
-          for a in qbittorrent rtorrent transmission sonarr lidarr 'autobrr;id' '../x' '' check2; do
+          for a in qbittorrent rtorrent transmission deluge 'autobrr;id' '../x' '' check2 features2 '--by'; do
             rc=0; sudo scripts/panel-upgrade "$a" > /dev/null 2>&1 || rc=$?
             [[ $rc -eq 2 ]] || { echo "::error::panel-upgrade '$a' exited $rc, expected 2"; exit 1; }
           done
-          rc=0; sudo scripts/panel-upgrade autobrr extra > /dev/null 2>&1 || rc=$?
-          [[ $rc -eq 2 ]] || { echo "::error::two arguments exited $rc"; exit 1; }
-          rc=0; sudo scripts/panel-upgrade autobrr > /dev/null 2>&1 || rc=$?
-          [[ $rc -eq 3 ]] || { echo "::error::not-installed app exited $rc, expected 3"; exit 1; }
+          bad=("autobrr extra" "autobrr --by" "autobrr --by root;id" "autobrr --by ../x" "autobrr --major --major2"
+               "rollback" "rollback qbittorrent" "hold --by x" "release autobrr --major" "rollback autobrr --major"
+               "hold autobrr extra" "check extra" "features extra")
+          for args in "${bad[@]}"; do
+            rc=0; read -ra av <<< "$args"; sudo scripts/panel-upgrade "${av[@]}" > /dev/null 2>&1 || rc=$?
+            [[ $rc -eq 2 ]] || { echo "::error::panel-upgrade $args exited $rc, expected 2"; exit 1; }
+          done
+          for args in "autobrr" "sonarr --major" "rollback prowlarr --by admin" "hold radarr" "release jellyfin"; do
+            rc=0; read -ra av <<< "$args"; sudo scripts/panel-upgrade "${av[@]}" > /dev/null 2>&1 || rc=$?
+            [[ $rc -eq 3 ]] || { echo "::error::not-installed app ($args) exited $rc, expected 3"; exit 1; }
+          done
+          [[ $(sudo scripts/panel-upgrade features) == *rollback* ]] || { echo "::error::features"; exit 1; }
       - name: upstream sync rules (quarantine, approval triggers, conflicts, approvals)
         run: |
           shellcheck -S warning .github/scripts/upstream-merge.sh .github/scripts/test-upstream-merge.sh
@@ -97,7 +105,12 @@ jobs:
             [ -e "$f" ] || { echo "::error::missing $f"; missing=1; }
           done
           exit $missing
-      - name: panel-upgrade-run end to end (good upgrade, broken upgrade restores program + data, apt no-op) - keep last
+      - name: rollback copies, history, holds and *arr updates (as root, with the symlink tricks a user could try)
+        run: |
+          pip install -q pyflakes 2> /dev/null || true
+          python3 -m pyflakes scripts/panel-upgrade-lib scripts/panel-updates-check .github/scripts/test-upgrade-lib.py || exit 1
+          sudo python3 .github/scripts/test-upgrade-lib.py
+      - name: panel-upgrade-run end to end (upgrade, rollback, undone rollback, hold, broken upgrade restores, apt no-op) - keep last
         run: |
           shellcheck -S warning -x .github/scripts/test-upgrade-run.sh
           sudo bash .github/scripts/test-upgrade-run.sh

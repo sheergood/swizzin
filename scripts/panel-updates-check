@@ -301,6 +301,46 @@ def check_arr(app, conf):
             "branch": (best or {}).get("branch")}
 
 
+def _upgrade_lib():
+    """panel-upgrade-lib (update history, holds), or None on servers that don't have it yet."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "panel-upgrade-lib")
+    if not os.path.isfile(path):
+        return None
+    try:
+        import importlib.machinery
+        import importlib.util
+        loader = importlib.machinery.SourceFileLoader("panel_upgrade_lib", path)
+        spec = importlib.util.spec_from_loader("panel_upgrade_lib", loader)
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        return mod
+    except Exception:  # noqa: BLE001 - the check itself must never fail because of the history
+        return None
+
+
+def note_changes(prev_apps, apps):
+    """Versions that changed since the last check without the panel doing it go into the update
+    history; held apps say so (the panel then doesn't offer their update)."""
+    lib = _upgrade_lib()
+    if lib is None:
+        return
+    try:
+        held = lib.holds()
+    except Exception:  # noqa: BLE001
+        held = {}
+    for app, d in apps.items():
+        h = held.get(app) if isinstance(held, dict) else None
+        if isinstance(h, dict):
+            d["held"] = {"version": h.get("version"), "since": h.get("since"), "by": h.get("by")}
+        old = prev_apps.get(app) if isinstance(prev_apps.get(app), dict) else {}
+        if d.get("error") or not old.get("installed") or not d.get("installed"):
+            continue
+        try:
+            lib.note_detected(app, str(old["installed"]), str(d["installed"]))
+        except Exception:  # noqa: BLE001
+            pass
+
+
 def main():
     try:
         with open(OUT) as f:
@@ -342,6 +382,7 @@ def main():
         except Exception as e:  # noqa: BLE001 - keep the last good answer, say what went wrong
             old = prev_apps.get(app) if isinstance(prev_apps.get(app), dict) else {}
             apps[app] = dict(old, error=str(e)[:200], error_at=now)
+    note_changes(prev_apps, apps)
     body = json.dumps({"checked": now, "apps": apps}, sort_keys=True)
     try:
         gid = grp.getgrnam(PANEL_GROUP).gr_gid
