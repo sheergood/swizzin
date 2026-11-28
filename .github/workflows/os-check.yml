@@ -57,7 +57,7 @@ jobs:
           docker exec swz chown -R root:root /root/swizzin
       - name: install, upgrade and check (several minutes; qBittorrent is compiled)
         run: |
-          docker exec -e APPS="${{ inputs.apps }}" -e ALLOW_RELEASE="${{ matrix.allow }}" swz bash /root/swizzin/.github/scripts/os-check.sh
+          docker exec -e TERM=xterm -e APPS="${{ inputs.apps }}" -e ALLOW_RELEASE="${{ matrix.allow }}" swz bash /root/swizzin/.github/scripts/os-check.sh
       - name: results
         if: always()
         run: |
@@ -67,6 +67,12 @@ jobs:
           docker cp swz:/root/logs results/swizzin-logs 2> /dev/null || true
           cat results/os-check.md >> "$GITHUB_STEP_SUMMARY"
           cat results/os-check.md
+          # the end of every step's log, and of swizzin's own log, readable right here
+          for f in results/os-check-logs/*.log; do
+            [ -f "$f" ] || continue
+            echo "::group::$(basename "$f")"; tail -n 60 "$f" | sed 's/\x1b\[[0-9;]*m//g'; echo "::endgroup::"
+          done
+          echo "::group::swizzin.log (last 200 lines)"; tail -n 200 results/swizzin-logs/swizzin.log 2> /dev/null | sed 's/\x1b\[[0-9;]*m//g'; echo "::endgroup::"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
